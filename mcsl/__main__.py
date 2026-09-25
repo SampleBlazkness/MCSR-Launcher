@@ -27,6 +27,7 @@ def main() -> int:
 
 
 def _banner(app_name: str, app_version: str) -> None:
+    from .logging_setup import log_path       # 必须在本函数里导入：模块级没有这个名字
     from .paths import config_file, data_root
     from .tools import winproc
 

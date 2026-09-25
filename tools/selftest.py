@@ -114,6 +114,42 @@ def test_instances() -> None:
         check(f"{name} cwd 存在", Path(command.cwd).is_dir())
 
 
+def test_startup_path() -> None:
+    """跑真正的入口路径（main 里的启动横幅 + 崩溃兜底），而不是只 import 模块。
+
+    教训：曾经 _banner() 里引用了模块级不存在的 log_path（只在 main 里局部导入），
+    所有 import 型测试都通过，一启动却直接弹 NameError。所以这里必须调用真函数。
+    """
+    import logging
+
+    from mcsl import APP_NAME, APP_VERSION
+    from mcsl.__main__ import _banner, _crash_report
+    from mcsl.logging_setup import log_path, setup
+
+    setup(level=logging.DEBUG)
+    try:
+        _banner(APP_NAME, APP_VERSION)
+        check("启动横幅能执行（入口路径无 NameError）", True)
+    except Exception as exc:  # noqa: BLE001
+        check("启动横幅能执行（入口路径无 NameError）", False, f"{type(exc).__name__}: {exc}")
+
+    # 崩溃兜底：把弹窗换成收集器，确认日志与提示内容都在
+    collected: dict[str, str] = {}
+    import mcsl.__main__ as entry
+
+    original = entry._show_dialog
+    entry._show_dialog = lambda message: collected.setdefault("msg", message)
+    try:
+        try:
+            raise RuntimeError("自检：模拟启动失败")
+        except RuntimeError as exc:
+            _crash_report(exc)
+        check("崩溃兜底会生成提示框文本", "启动失败" in collected.get("msg", ""))
+        check("崩溃提示里带日志路径", str(log_path()) in collected.get("msg", ""))
+    finally:
+        entry._show_dialog = original
+
+
 def test_secret_scan() -> None:
     """密钥扫描器必须能抓出 JWT，同时不误报正常代码。"""
     import subprocess  # noqa: F401 - 只用于说明扫描器可独立运行
@@ -147,6 +183,8 @@ def main() -> int:
     test_config()
     print("-" * 60)
     test_instances()
+    print("-" * 60)
+    test_startup_path()
     print("-" * 60)
     test_secret_scan()
     print("=" * 60)
