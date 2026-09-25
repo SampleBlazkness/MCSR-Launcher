@@ -26,9 +26,26 @@
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 
-# 2. 开图形界面（也可以双击 run.cmd）
+# 2. 开图形界面（也可以双击 run.cmd 或桌面的 MCSR-Launcher 快捷方式）
 .venv\Scripts\python -m mcsl
 ```
+
+三种启动方式：
+
+| 方式 | 说明 |
+| --- | --- |
+| 桌面快捷方式 `MCSR-Launcher.lnk` | **推荐**。指向 `wscript.exe` + `MCSR-Launcher.vbs`，全程不出现 cmd 黑框；`.venv` 缺失时会弹框提示 |
+| `run.cmd` | 双击即可，同样不保留黑框；出错时才会停下来显示文字 |
+| `run-console.cmd` | **带控制台**，报错和日志直接可见，排查问题时用这个 |
+
+> **为什么 `.cmd` / `.vbs` 里一个中文都不写**：cmd.exe 用系统 OEM 代码页（中文 Windows 是
+> GBK）读取脚本字节，UTF-8 的中文注释会被错误解码，甚至把下一行的换行符一起吃掉，
+> 于是 `rem …` 和 `setlocal` 被拼成一条命令，报
+> `'…?setlocal' is not recognized as an internal or external command`。
+> 所以这两个批处理和 VBS 保持纯 ASCII + CRLF。中文说明都放在本文件和界面里。
+>
+> 另外用 `pythonw` 启动时没有控制台：万一启动阶段就崩了，程序会用**原生 MessageBox**
+> 弹出错误并把回溯写进日志，不会静默消失。
 
 首次运行：
 

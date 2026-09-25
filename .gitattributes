@@ -2,9 +2,11 @@
 *.py  text eol=lf
 *.md  text eol=lf
 *.json text eol=lf
+# 批处理 / 脚本宿主：必须 CRLF，且内容保持纯 ASCII
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.cmd text eol=crlf
+*.vbs text eol=crlf
 *.jar binary
 *.dll binary
 *.png binary
