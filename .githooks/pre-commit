@@ -1,0 +1,16 @@
+#!/bin/sh
+# ============================================================
+#  提交前钩子：扫描暂存区里的疑似凭据（token 等）
+#  启用方式：git config core.hooksPath .githooks
+# ============================================================
+PY=""
+for candidate in ".venv/Scripts/python.exe" ".venv/bin/python" "python" "py"; do
+    if command -v "$candidate" >/dev/null 2>&1; then PY="$candidate"; break; fi
+done
+
+if [ -z "$PY" ]; then
+    echo "[!] 找不到 python，跳过密钥扫描（建议手动安装 Python 后重试）" >&2
+    exit 0
+fi
+
+"$PY" tools/check_secrets.py --staged

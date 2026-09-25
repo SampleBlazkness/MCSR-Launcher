@@ -1,0 +1,61 @@
+# ============================================================
+#  MCSR-Launcher / .gitignore
+#  铁律：任何 token、账号、密钥、运行期数据一律不进仓库。
+# ============================================================
+
+# ---------- 凭据 / 运行期数据（最高优先）----------
+# 账号数据（DPAPI 加密的 refresh token 等）—— 运行期放在
+# %LOCALAPPDATA%\MCSR-Launcher\ 下，仓库内出现同名文件也一律忽略
+data/
+accounts.dat
+*.token
+*.tok
+tokens.json
+token.json
+config/local.json
+local.json
+
+# 渲染出来的启动脚本 / 进程记录 / 日志
+run/
+logs/
+*.log
+
+# ---------- 通用凭据模式（防止手滑把密钥写进配置）----------
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
+.env
+.env.*
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- 打包产物 ----------
+*.exe
+*.msi
+# 但保留源码目录里的脚本
+!tools/*.py
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---------- 系统 ----------
+Thumbs.db
+desktop.ini
+.DS_Store

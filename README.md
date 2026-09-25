@@ -1,0 +1,135 @@
+# MCSR-Launcher
+
+给 Minecraft 速通（RSG）用的一键启动器：**自动获取 Minecraft access_token**，
+一条命令拉起 NinjabrainBot / Jingle / OBS 和游戏，退出后自动清理。
+
+替代原来那个「每次都要去 HMCL 导出脚本、手动粘 access_token」的流程。
+
+---
+
+## 它解决了什么
+
+| 旧流程的痛点 | 现在的做法 |
+| --- | --- |
+| 每次启动都要用 HMCL 导出脚本拿 access_token，手粘进 ps1 | 启动器自己走微软 OAuth（设备码 / 浏览器授权）→ Xbox Live → XSTS → Minecraft Services，**登录一次，之后自动续期** |
+| `access_token` 明文写在脚本里、还躺在桌面上 | refresh token 用 Windows **DPAPI 加密**存在 `%LOCALAPPDATA%\MCSR-Launcher\accounts.dat`，仓库与 OneDrive 里都没有 |
+| Jingle 关了不掉（提权进程 + UIPI），错误被 `-ErrorAction SilentlyContinue` 吞掉 | 工具由启动器自己启动、自己持有 PID；启动器默认以管理员身份运行，关闭时逐级降级（WM_CLOSE → 强杀 → 提权 taskkill）并**记录每一步的成功/失败原因** |
+| OBS 关不掉（原因未定位） | 退出后弹窗询问；关闭过程写诊断日志，能直接看出卡在哪一步 |
+| 4 个路径写死在脚本里 | 界面上四个路径选择器 + `.minecraft`、Java 路径，全部持久化 |
+
+---
+
+## 快速开始
+
+```bash
+# 1. 依赖（仓库里已经建好 .venv）
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+
+# 2. 开图形界面（也可以双击 run.cmd）
+.venv\Scripts\python -m mcsl
+```
+
+首次运行：
+
+1. 「账号与登录」页确认 `client_id` 与端点预设（默认是 `live` + 官方启动器的公开 id，开箱可用）。
+2. 点右上角「登录微软账号」，浏览器打开 `https://www.microsoft.com/link` 输入界面上的代码。
+   登录成功后 refresh token 会加密落盘，**以后不用再登**。
+3. 「路径与实例」页选好 `.minecraft` 目录、四个工具路径、Java 路径，选实例。
+4. 「启动设置」页调内存 / JVM 参数（默认已经是你原来那套调参）。
+5. 点「启动游戏」。
+
+默认会**询问是否以管理员身份重新启动自己**——必须提权才能正常关闭 Jingle
+这类以管理员身份启动的工具。UAC 设为「始终允许」时不会弹窗。
+
+---
+
+## 目录结构
+
+```
+mcsl/
+  auth/        微软 OAuth（设备码 + 浏览器授权码 PKCE）/ XBL / XSTS / Minecraft Services / DPAPI 凭据存储
+  launch/      版本 JSON 解析（含 inheritsFrom 合并）、rules 求值、natives、命令行组装、进程管理
+  tools/       Jingle / NinjabrainBot / OBS 的启动与关闭（纯 ctypes 的 Windows 进程/窗口操作）
+  ui/          PySide6 界面（core 层不依赖它）
+  cli.py       无界面入口，便于调试和自动化
+config/
+  defaults.json   默认配置模板（可提交，含账号之外的一切默认值）
+tools/
+  check_secrets.py       提交前密钥扫描（pre-commit 钩子调用）
+  compare_with_ps1.py    开发期校验：把生成的命令行与 HMCL 导出脚本逐项对比
+```
+
+运行期数据**全部在仓库之外**：
+
+```
+%LOCALAPPDATA%\MCSR-Launcher\
+  accounts.dat    账号凭据（DPAPI 加密）
+  config.json     你的实际配置（仓库里的 defaults.json 只提供默认值）
+  logs\           日志（token 会被自动打码）
+  run\            游戏控制台输出
+```
+
+---
+
+## 配置要点
+
+- **按实例覆盖**：`launch.instances["<实例名>"]` 可以只覆盖内存 / JVM 参数 / 分辨率等，
+  例如默认配置里 `26.3-Fabric` 单独设了 10240MB、854×480 和它自己那套 GC 参数。
+  界面上勾选「上面的内存/JVM 参数只对当前实例生效」即可。
+- **JVM 参数预设**：`custom`（默认，逐字沿用你的调参）、`aikar`（Aikar 基线）、
+  `vanilla`（只加 log4shell/RMI 加固参数）。
+- **工具退出策略**：每个工具可选「自动关闭 / 退出时询问 / 保持运行」。
+  默认 NinjabrainBot 和 Jingle 自动关，OBS 询问。
+- **命令行生成**：完全由版本 JSON 驱动（`arguments.jvm` / `arguments.game` + 占位符 +
+  rules 求值），和 HMCL / 官方启动器同一套逻辑，装新实例不用改代码。
+  已经与 HMCL 导出的脚本做过逐项对比，classpath 完全一致
+  （1.16.1：42/42 项；26.3-Fabric：83/83 项）。
+
+---
+
+## 安全说明
+
+- refresh token / access token **从不写入仓库**：`.gitignore` 排除了 `data/`、`accounts.dat`、
+  `*.token`、`config/local.json` 等；另有 `.githooks/pre-commit` 做内容级扫描
+  （JWT 特征、`refresh_token=` 之类的赋值），命中就阻止提交。
+  启用钩子：`git config core.hooksPath .githooks`
+- 凭据用 DPAPI 加密，绑定当前 Windows 用户 + 机器；文件拷走也解不开。
+- 日志会把疑似 token 替换成 `<redacted>`。
+- 如实说明：java 命令行里必然带 access_token，同一用户的其他进程能看到它。
+  这是启动 Minecraft 的固有性质（HMCL、官方启动器同理），不是本程序引入的。
+- 借用了官方启动器的公开 `client_id` 作为默认值。想要完全自主，就注册一个自己的
+  Azure 应用（免费）：应用注册 → 支持的账户类型选「仅个人 Microsoft 账户」→
+  重定向 URI 填 `http://localhost:29111` → 「允许公共客户端流」设为是 →
+  把 Application (client) ID 填进界面，端点预设切到 `v2` 即可。
+
+---
+
+## 命令行工具
+
+```bash
+.venv\Scripts\python -m mcsl.cli instances                  # 列出实例
+.venv\Scripts\python -m mcsl.cli dump-command --instance 1.16.1 --json   # 只组装命令行，不启动
+.venv\Scripts\python -m mcsl.cli auth-status                # 账号/令牌状态
+.venv\Scripts\python -m mcsl.cli login                      # 登录（终端里显示设备码）
+.venv\Scripts\python -m mcsl.cli auth-token                 # 刷新令牌并显示抬头信息
+.venv\Scripts\python -m mcsl.cli tools-status               # 工具路径与进程状态
+.venv\Scripts\python -m mcsl.cli launch --no-tools          # 只启动游戏
+```
+
+---
+
+## 已知限制 / 下一步
+
+- 「原生模式」已实现，但**不会自动下载缺失的库**：库文件缺失时只在日志里警告
+  （你的两个实例都由 HMCL 下载好了，不缺）。
+- 辅助工具里只有 `.exe` 类型支持「已在运行就复用」；jar 工具无法可靠识别已有进程。
+- 界面上的「按实例覆盖」只有内存/JVM 参数/分辨率；`config.json` 支持更多字段（java 路径、
+  窗口标题等）。
+- 计划中：Modrinth/Fabric 实例安装、每个实例独立的 4 条工具路径、录制状态与 OBS 联动、
+  令牌失效时的无感重登、打包成单文件 exe。
+
+## 许可
+
+PySide6 是 LGPL v3：本程序以动态链接方式使用它，若要分发打包产物，请附上
+Qt/PySide6 的许可声明。

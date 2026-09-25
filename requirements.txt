@@ -1,0 +1,6 @@
+# 运行时依赖
+PySide6>=6.6            # GUI（LGPL：动态链接使用，分发时附许可声明）
+requests>=2.31          # OAuth / Xbox Live / Minecraft Services 的 HTTPS 调用
+
+# 开发期可选
+# pyinstaller>=6.0      # 之后打包单文件 exe 用
