@@ -1,6 +1,13 @@
 # 运行时依赖
-PySide6>=6.6            # GUI（LGPL：动态链接使用，分发时附许可声明）
-requests>=2.31          # OAuth / Xbox Live / Minecraft Services 的 HTTPS 调用
+#
+# 用 PySide6-Essentials 而不是完整的 PySide6：
+#   完整版会连带下载 ~168 MB 的 pyside6_addons（WebEngine / 3D / Charts 等），
+#   我们用不到（界面只用了 QtWidgets/QtCore/QtGui），而大文件在你的代理下
+#   很容易超时。Essentials 装完同样提供 `import PySide6`。
+#   国内网络建议直接走镜像：
+#     .venv\Scripts\python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+PySide6-Essentials>=6.6    # GUI（LGPL：动态链接使用，分发时附许可声明）
+requests>=2.31             # OAuth / Xbox Live / Minecraft Services 的 HTTPS 调用
 
 # 开发期可选
-# pyinstaller>=6.0      # 之后打包单文件 exe 用
+# pyinstaller>=6.0         # 之后打包单文件 exe 用

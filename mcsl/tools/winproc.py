@@ -13,6 +13,7 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
@@ -203,6 +204,8 @@ def send_close(pid: int) -> int:
     注意：窗口是隐藏的（最小化到托盘）也能收到 WM_CLOSE —— 只要用
     EnumWindows 枚举，而不是依赖 Get-Process 的 MainWindowHandle
     （后者在窗口隐藏时是 0，PowerShell 的 CloseMainWindow() 会直接假失败）。
+
+    但**不要**用它做正常关闭：见 send_close_ranked 的说明。
     """
     if not is_windows():
         return 0
@@ -212,6 +215,105 @@ def send_close(pid: int) -> int:
         if user32.PostMessageW(hwnd, WM_CLOSE, 0, 0):
             posted += 1
     return posted
+
+
+# Java AWT / 输入法等的内部隐藏窗口：给它们发 WM_CLOSE 会让 AWT 事件循环
+# 先挂掉，真正的窗口关闭事件反而送不到程序里（进程变僵尸）。
+# 实测：NinjabrainBot 的 SunAwtToolkit 窗口被 WM_CLOSE 命中后就再也不会正常退出。
+_INTERNAL_WINDOW_CLASSES = {
+    "SunAwtToolkit", "SunAwtFrameProxy", "D3DFocusWindow", "IME",
+    "MSCTFIME UI", "GDI+ Hook Window Class", "CLIPBRD_EVENT_WINDOW",
+}
+# 这些类更像是主窗口（加分）
+_LIKELY_MAIN_CLASSES = {"SunAwtFrame", "Qt5152QWindowIcon", "Qt5QWindowIcon",
+                        "Qt6QWindowIcon", "Chrome_WidgetWin_1", "GLFW30", "LWJGL"}
+
+_WS_CAPTION = 0x00C00000
+_GWL_STYLE = -16
+
+
+@dataclass
+class WindowInfo:
+    hwnd: int
+    class_name: str
+    title: str
+    visible: bool
+    score: int = 0
+
+    def describe(self) -> str:
+        return (f"{self.hwnd:#x} 类={self.class_name or '?'} "
+                f"标题={(self.title or '(无)')[:28]!r} 可见={'是' if self.visible else '否'} "
+                f"得分={self.score}")
+
+
+def window_info(hwnd: int) -> WindowInfo:
+    user32 = ctypes.WinDLL("user32.dll", use_last_error=True)
+    cls = ctypes.create_unicode_buffer(256)
+    title = ctypes.create_unicode_buffer(512)
+    visible = bool(user32.IsWindowVisible(hwnd))
+    try:
+        user32.GetClassNameW(hwnd, cls, 256)
+        user32.GetWindowTextW(hwnd, title, 512)
+        user32.GetWindowLongW.restype = ctypes.c_long
+        style = user32.GetWindowLongW(hwnd, _GWL_STYLE)
+    except OSError:
+        style = 0
+    info = WindowInfo(hwnd=int(hwnd), class_name=cls.value, title=title.value, visible=visible)
+    # 打分：越像"主窗口"越高，内部窗口直接打成负数被排到最后
+    if info.class_name in _INTERNAL_WINDOW_CLASSES:
+        info.score = -100
+    else:
+        if visible:
+            info.score += 3
+        if info.title.strip():
+            info.score += 2
+        if style & _WS_CAPTION:
+            info.score += 1
+        if info.class_name in _LIKELY_MAIN_CLASSES:
+            info.score += 2
+    return info
+
+
+def candidate_windows(pid: int) -> list[WindowInfo]:
+    """按"像主窗口的程度"排序的顶层窗口列表。"""
+    infos = [window_info(hwnd) for hwnd in windows_of_pid(pid)]
+    return sorted(infos, key=lambda i: -i.score)
+
+
+def send_close_ranked(pid: int, *, per_window_timeout: float = 1.5,
+                      total_timeout: float = 8.0,
+                      on_note: Callable[[str], None] | None = None) -> tuple[bool, list[WindowInfo]]:
+    """逐个向候选窗口投递 WM_CLOSE，命中主窗口就会正常退出。
+
+    返回 (是否已退出, 尝试过的窗口列表)。每个窗口之间等一小会儿——只打主窗口
+    才不会把 AWT/Qt 的内部窗口先打死。
+    """
+    if not is_windows():
+        return True, []
+    user32 = ctypes.WinDLL("user32.dll", use_last_error=True)
+    candidates = candidate_windows(pid)
+    if not candidates:
+        return not is_running(pid), []
+    if on_note:
+        on_note("候选窗口：" + "；".join(c.describe() for c in candidates[:4]))
+
+    deadline = time.time() + total_timeout
+    for info in candidates:
+        if not is_running(pid):
+            return True, candidates
+        if time.time() >= deadline:
+            break
+        user32.PostMessageW(info.hwnd, WM_CLOSE, 0, 0)
+        wait_until = min(time.time() + per_window_timeout, deadline)
+        while time.time() < wait_until:
+            if not is_running(pid):
+                if on_note:
+                    on_note(f"WM_CLOSE 命中主窗口 {info.class_name}，已正常退出")
+                return True, candidates
+            time.sleep(0.1)
+        if on_note:
+            on_note(f"WM_CLOSE 投递给 {info.class_name} 后无反应")
+    return not is_running(pid), candidates
 
 
 # ------------------------------------------------------------------ 等待/结束

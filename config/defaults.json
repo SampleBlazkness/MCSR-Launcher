@@ -34,7 +34,7 @@
       "enabled": true,
       "path": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
       "args": [],
-      "elevated": false,
+      "elevated": true,
       "close_on_exit": "ask",
       "start_delay_ms": 0,
       "working_dir": ""

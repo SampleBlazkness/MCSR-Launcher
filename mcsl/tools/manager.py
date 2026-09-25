@@ -213,20 +213,22 @@ class ToolManager:
         diag.append(f"PID {pid}，提权={'是' if elevated else '否'}"
                     + ("（管理员启动器继承）" if adopted and elevated else ""))
 
-        windows = winproc.windows_of_pid(pid)
-        diag.append(f"顶层窗口 {len(windows)} 个（含隐藏窗口）")
-        posted = winproc.send_close(pid)
-        diag.append(f"WM_CLOSE 投递成功 {posted} 个" if posted else "没有可用窗口，跳过 WM_CLOSE")
+        windows = winproc.candidate_windows(pid)
+        diag.append(f"顶层窗口 {len(windows)} 个"
+                    + (f"，最像主窗口的是 {windows[0].class_name}（{windows[0].title[:24] or '无标题'}）"
+                       if windows else "（没有窗口，可能已最小化到托盘）"))
 
-        timeout = grace if grace is not None else (8.0 if name == "obs" else 3.0)
-        if posted and winproc.wait_for_exit(pid, timeout):
-            diag.append(f"{timeout:.0f} 秒内正常退出")
+        timeout = grace if grace is not None else (8.0 if name == "obs" else 5.0)
+        closed, _ = winproc.send_close_ranked(
+            pid, per_window_timeout=1.5, total_timeout=timeout,
+            on_note=diag.append)
+        if closed:
             self._forget(name, pid)
             self._emit("info", f"{label} 已正常退出")
-            return CloseReport(name=name, outcome="closed", detail=f"{timeout:.0f}s", diagnostics=diag)
+            return CloseReport(name=name, outcome="closed", detail=f"{timeout:.0f}s",
+                               diagnostics=diag)
 
-        if posted:
-            diag.append(f"等待 {timeout:.0f} 秒仍未退出（可能弹了确认对话框，或进程卡住）")
+        diag.append(f"{timeout:.0f} 秒内没能让它正常退出，改为强制结束")
 
         ok, err = winproc.terminate(pid)
         if ok:

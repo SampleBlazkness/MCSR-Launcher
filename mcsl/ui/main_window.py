@@ -44,9 +44,12 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.resize(980, 720)
+        # 加载守卫：_load_into_ui 会给控件赋值，控件信号不能在这期间回写配置
+        self._loading = True
         self._build_ui()
         self._load_into_ui()
         self._refresh_instances(reload_only=True)
+        self._loading = False
         QTimer.singleShot(200, self._warm_token)
 
     # ================================================================= 界面
@@ -237,7 +240,7 @@ class MainWindow(QMainWindow):
             box = QGroupBox(TOOL_LABELS.get(name, name))
             form = QFormLayout(box)
             enable = QCheckBox("启动游戏时一起启动")
-            elevate = QCheckBox("以管理员身份启动（Jingle 需要）")
+            elevate = QCheckBox("以管理员身份启动" + ("（Jingle 需要）" if name == "jingle" else ""))
             close_combo = QComboBox()
             for label, value in CLOSE_CHOICES:
                 close_combo.addItem(label, value)
@@ -302,6 +305,14 @@ class MainWindow(QMainWindow):
 
     # ================================================================= 载入/保存
     def _load_into_ui(self) -> None:
+        previous = self._loading
+        self._loading = True
+        try:
+            self._load_into_ui_inner()
+        finally:
+            self._loading = previous
+
+    def _load_into_ui_inner(self) -> None:
         cfg = self.cfg
         launch = cfg.launch.effective(cfg.launch.instance)
         self.picker_mc.set_value(cfg.launch.minecraft_dir)
@@ -403,6 +414,8 @@ class MainWindow(QMainWindow):
 
     # ================================================================= 交互
     def _on_path_changed(self) -> None:
+        if self._loading:
+            return
         cfg = self._collect_from_ui()
         if Path(cfg.launch.minecraft_dir).is_dir():
             self._refresh_instances(reload_only=True)
@@ -412,7 +425,7 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _on_instance_changed(self, name: str) -> None:
-        if not name:
+        if self._loading or not name:
             return
         self.cfg.launch.instance = name
         self._load_into_ui()
@@ -440,6 +453,8 @@ class MainWindow(QMainWindow):
         self._append_log(f"已检测到 Java：{best}")
 
     def _on_jvm_edited(self, *_args) -> None:
+        if self._loading:
+            return
         if self.per_instance_check.isChecked():
             self.per_instance_check.setToolTip("当前实例已有独立设置")
         self.status.showMessage("设置已修改，点“保存配置”生效或直接启动（会自动保存）", 4000)
@@ -454,7 +469,7 @@ class MainWindow(QMainWindow):
         self.status.showMessage("登录相关设置已修改，点“保存配置”后生效", 4000)
 
     def _refresh_instances(self, reload_only: bool = False) -> None:
-        cfg = self._collect_from_ui() if not reload_only else self.cfg
+        cfg = self.cfg if (reload_only or self._loading) else self._collect_from_ui()
         mc_dir = Path(cfg.launch.minecraft_dir) if cfg.launch.minecraft_dir else None
         instances = list_instances(mc_dir) if mc_dir and mc_dir.is_dir() else []
         current = cfg.launch.instance
