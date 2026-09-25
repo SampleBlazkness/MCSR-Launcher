@@ -23,7 +23,7 @@ from ..tools import winproc
 from ..tools.manager import TOOL_LABELS
 from .dialogs import LoginDialog
 from .widgets import LogView, PathPicker
-from .workers import GameExitWorker, LaunchWorker, TokenWorker, track_thread
+from .workers import GameExitWorker, LaunchWorker, TokenWorker, track_object, track_thread
 
 log = logging.getLogger(__name__)
 
@@ -543,9 +543,18 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def _on_login_succeeded(self, name: str, uuid: str) -> None:
-        self._append_log(f"登录成功：{name}（uuid {uuid[:8]}…）")
-        self._refresh_account_bar()
-        self._warm_token()
+        # 逐步写日志：这条路径曾经在真实登录后静默死亡，日志断点就是定位线索
+        log.info("界面收到登录成功：%s（uuid %s）", name, uuid[:8])
+        try:
+            self._append_log(f"登录成功：{name}（uuid {uuid[:8]}…）")
+            log.debug("已写入日志窗格")
+            self._refresh_account_bar()
+            log.info("账号栏刷新完成")
+        except Exception:  # noqa: BLE001
+            log.exception("登录成功后的界面刷新失败")
+        # 刻意**不**在这里预热令牌：登录流程刚刚做完完整认证链，令牌是新的；
+        # 立刻在另一个线程里再碰同一个 AccountManager/requests.Session 属于
+        # 共享对象的并发使用，没必要冒这个险。
 
     @Slot()
     def _on_relogin_clicked(self) -> None:
@@ -566,8 +575,10 @@ class MainWindow(QMainWindow):
 
     def _warm_token(self) -> None:
         if self.accounts.selected is None:
+            log.debug("没有账号，跳过令牌预热")
             self._refresh_account_bar()
             return
+        log.info("开始预热令牌（账号 %s）", self.accounts.selected.name)
         worker = TokenWorker(self.accounts)
         worker.status.connect(self._on_token_status)
         worker.success.connect(self._on_token_success)
@@ -576,15 +587,21 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_token_status(self, message: str) -> None:
+        log.debug("令牌预热：%s", message)
         self.status.showMessage(message, 4000)
 
     @Slot(str, str, int)
     def _on_token_success(self, name: str, uuid: str, remaining: int) -> None:
-        self._refresh_account_bar()
+        log.info("令牌预热完成：%s（剩余 %d 秒）", name, remaining)
+        try:
+            self._refresh_account_bar()
+        except Exception:  # noqa: BLE001
+            log.exception("刷新账号栏失败")
         self.status.showMessage(f"令牌就绪：{name}（剩余 {remaining // 3600} 小时）", 6000)
 
     @Slot(str)
     def _on_token_failed(self, message: str) -> None:
+        log.warning("令牌预热失败：%s", message)
         self._append_log(f"⚠ 令牌刷新失败：{message}")
         self.status.showMessage("令牌刷新失败", 6000)
 
@@ -707,6 +724,9 @@ class MainWindow(QMainWindow):
 
     def _start_worker(self, worker) -> QThread:
         # 线程不挂父对象 + 登记在 _ACTIVE_THREADS：避免"线程还在跑，对象先被销毁"
+        # worker 也必须钉住：纯 Python 创建的 QObject 归 Python 所有，引用一断
+        # PySide6 就会删掉 C++ 对象，而它可能还在工作线程里等着 deleteLater。
+        worker = track_object(worker)
         thread = track_thread(QThread())
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -714,6 +734,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(worker.deleteLater)
         self._threads.append(thread)
         thread.start()
+        log.debug("已启动后台线程（%s）", type(worker).__name__)
         return thread
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 接口

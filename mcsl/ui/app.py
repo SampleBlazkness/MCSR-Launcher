@@ -1,16 +1,75 @@
-"""GUI 入口：QApplication 初始化 + 提权自重启。"""
+"""GUI 入口：QApplication 初始化 + 提权自重启 + 崩溃/诊断信息的落地。
+
+诊断三件套（用 pythonw 启动时没有控制台，任何 stderr 输出都看不到，
+所以必须主动写文件，否则出问题只能靠猜）：
+  1. faulthandler  → 原生崩溃（段错误/abort）的 C 层调用栈写进 logs/faulthandler.log
+  2. sys.excepthook / threading.excepthook → Python 异常写进日志
+  3. Qt 消息处理器 → Qt 自己的警告（跨线程调用控件、定时器线程错误等）写进日志
+"""
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 import sys
+import threading
+import traceback
+from pathlib import Path
 
 from .. import APP_NAME, APP_VERSION
 from ..config import load_config
-from ..paths import project_root
+from ..paths import logs_dir, project_root
 from ..tools import winproc
 
 log = logging.getLogger(__name__)
+
+# 保持引用：faulthandler 需要文件对象一直存活
+_fault_stream = None
+
+
+def _install_diagnostics() -> None:
+    global _fault_stream
+    try:
+        logs_dir().mkdir(parents=True, exist_ok=True)
+        path = logs_dir() / "faulthandler.log"
+        _fault_stream = open(path, "a", encoding="utf-8", errors="replace")
+        _fault_stream.write(f"\n===== {APP_NAME} {APP_VERSION} 启动 "
+                            f"(pid={os.getpid()}, elevated={winproc.is_self_elevated()}) =====\n")
+        _fault_stream.flush()
+        faulthandler.enable(file=_fault_stream, all_threads=True)
+    except OSError as exc:
+        log.warning("无法启用 faulthandler：%s", exc)
+
+    def _excepthook(exc_type, exc, tb) -> None:
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        logging.getLogger("mcsl.crash").error("未捕获的异常：\n%s", text)
+        try:
+            if _fault_stream is not None:
+                _fault_stream.write("\n----- Python 异常 -----\n" + text)
+                _fault_stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    sys.excepthook = _excepthook
+    threading.excepthook = lambda args: _excepthook(args.exc_type, args.exc_value, args.exc_traceback)
+
+    try:
+        from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+        levels = {QtMsgType.QtDebugMsg: logging.DEBUG,
+                  QtMsgType.QtInfoMsg: logging.INFO,
+                  QtMsgType.QtWarningMsg: logging.WARNING,
+                  QtMsgType.QtCriticalMsg: logging.ERROR,
+                  QtMsgType.QtFatalMsg: logging.CRITICAL}
+        qt_log = logging.getLogger("qt")
+
+        def _handler(mode, context, message) -> None:  # noqa: ANN001
+            level = levels.get(mode, logging.INFO)
+            qt_log.log(level, "%s", message)
+
+        qInstallMessageHandler(_handler)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("未能安装 Qt 消息处理器：%s", exc)
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -23,6 +82,7 @@ def run(argv: list[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("MCSR-Launcher")
+    _install_diagnostics()
 
     if not _maybe_relaunch_elevated(cfg, QMessageBox):
         return 0

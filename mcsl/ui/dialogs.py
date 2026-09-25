@@ -17,9 +17,13 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QMessageBox,
 
 from ..config import AppConfig
 from ..auth.manager import AccountManager
-from .workers import LoginWorker, track_thread
+from .workers import LoginWorker, track_object, track_thread
 
 log = logging.getLogger(__name__)
+
+# 对话框也要活到它的工作线程结束：否则 Python 包装对象先被回收，
+# worker 的 Python 引用随之消失 → C++ 对象被提前删除（同上）。
+_LIVE_DIALOGS: list[QDialog] = []
 
 
 class LoginDialog(QDialog):
@@ -64,7 +68,7 @@ class LoginDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        self.worker = LoginWorker(cfg, accounts, cfg.auth.flow, cfg.auth.client_id)
+        self.worker = track_object(LoginWorker(cfg, accounts, cfg.auth.flow, cfg.auth.client_id))
         # 线程不挂父对象：即使对话框先被回收，也由 _ACTIVE_THREADS 持住，
         # 不会被 Qt 当成"运行中却被销毁"而 abort
         self.thread = track_thread(QThread())
@@ -77,7 +81,17 @@ class LoginDialog(QDialog):
         self.worker.finished.connect(self.thread.quit)
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.started.connect(self.worker.run)
+        self.thread.finished.connect(self._on_thread_finished)
+        _LIVE_DIALOGS.append(self)
         self.thread.start()
+
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        """工作线程结束后才允许回收本对话框。"""
+        for index, dialog in enumerate(_LIVE_DIALOGS):
+            if dialog is self:
+                del _LIVE_DIALOGS[index]
+                break
 
     # ------------------------------------------------------------ 槽
     @Slot(str)

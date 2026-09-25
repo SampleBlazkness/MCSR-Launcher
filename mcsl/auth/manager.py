@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -25,6 +26,18 @@ TOKEN_SKEW = 120
 
 StatusCb = Callable[[str], None]
 DeviceCodeCb = Callable[[oauth.DeviceCode], None]
+
+
+def _locked(fn):
+    """用 AccountManager._lock 串行化认证链，避免共享 requests.Session 被并发使用。"""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 @dataclass
@@ -47,6 +60,9 @@ class AccountManager:
     def __init__(self, auth_cfg: AuthConfig, store: AccountStore | None = None) -> None:
         self.cfg = auth_cfg
         self.store = store or AccountStore()
+        # 认证链（尤其是底层 requests.Session）不是线程安全的：登录线程、令牌预热线程
+        # 可能同时碰同一个实例。用一把锁把它们串起来，避免并发使用共享对象。
+        self._lock = threading.RLock()
         self.http = requests.Session()
         self.http.headers["User-Agent"] = "MCSR-Launcher/0.1 (+https://github.com/SampleBlazkness)"
         # 代理/网络偶发重置连接（实测见过 ConnectionResetError 10054）。
@@ -94,6 +110,7 @@ class AccountManager:
         self._session = None
 
     # ------------------------------------------------------------ 登录
+    @_locked
     def login(self, *, flow: str | None = None, client_id: str | None = None,
               preset: str | None = None, on_status: StatusCb | None = None,
               on_device_code: DeviceCodeCb | None = None,
@@ -154,6 +171,7 @@ class AccountManager:
         )
 
     # ------------------------------------------------------------ 取得会话
+    @_locked
     def acquire_session(self, account: Account | None = None, *, force: bool = False,
                         on_status: StatusCb | None = None) -> MCSession:
         """返回可用的 Minecraft 会话；失效则自动刷新（用户无感）。"""

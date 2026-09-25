@@ -19,11 +19,32 @@ log = logging.getLogger(__name__)
 # 统一登记在这里，线程真正结束（finished）后才摘掉。
 _ACTIVE_THREADS: set[QThread] = set()
 
+# 同理，**工作在子线程里的 QObject（worker）也必须有人持有 Python 引用**：
+# 纯 Python 创建的 QObject 归 Python 所有，一旦最后一个 Python 引用消失，
+# PySide6 会立刻删除 C++ 对象 —— 而它可能还停在工作线程里等着
+# thread.finished → deleteLater，于是"删两次"变成释放后使用（访问违例 0xC0000005），
+# 且没有任何 Python 回溯，只有偶发崩溃。登记到 Qt 真正销毁（destroyed）为止。
+_ACTIVE_OBJECTS: list[QObject] = []
+
 
 def track_thread(thread: QThread) -> QThread:
     _ACTIVE_THREADS.add(thread)
     thread.finished.connect(lambda: _ACTIVE_THREADS.discard(thread))
     return thread
+
+
+def track_object(obj):
+    """把 worker 之类的 QObject 钉住，直到 Qt 自己销毁它。"""
+    _ACTIVE_OBJECTS.append(obj)
+    obj.destroyed.connect(lambda *_: _drop_object(obj))
+    return obj
+
+
+def _drop_object(obj) -> None:
+    for index, existing in enumerate(_ACTIVE_OBJECTS):
+        if existing is obj:
+            del _ACTIVE_OBJECTS[index]
+            return
 
 
 class LaunchWorker(QObject):
