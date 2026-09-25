@@ -5,13 +5,12 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QFont
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-                               QStatusBar, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QThread, QTimer, Slot
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+                               QPushButton, QSpinBox, QStatusBar, QTabWidget,
+                               QVBoxLayout, QWidget)
 
 from .. import APP_NAME, APP_VERSION
 from ..auth.manager import AccountManager
@@ -22,8 +21,9 @@ from ..launch.version import list_instances
 from ..paths import data_root, logs_dir
 from ..tools import winproc
 from ..tools.manager import TOOL_LABELS
+from .dialogs import LoginDialog
 from .widgets import LogView, PathPicker
-from .workers import GameExitWorker, LaunchWorker, LoginWorker, TokenWorker
+from .workers import GameExitWorker, LaunchWorker, TokenWorker, track_thread
 
 log = logging.getLogger(__name__)
 
@@ -295,7 +295,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         layout.addStretch(1)
 
-        self.relogin_button.clicked.connect(lambda: self._on_login_clicked(force=True))
+        self.relogin_button.clicked.connect(self._on_relogin_clicked)
         self.logout_button.clicked.connect(self._on_logout)
         self.auth_changed_widgets = [self.client_id_edit, self.preset_auth_combo, self.flow_combo]
         for widget in self.auth_changed_widgets:
@@ -533,50 +533,23 @@ class MainWindow(QMainWindow):
             pass
         self.accounts.cfg = self.cfg.auth
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("登录微软账号")
-        dialog.setMinimumWidth(460)
-        layout = QVBoxLayout(dialog)
-        head = QLabel("正在向微软请求授权…")
-        head.setWordWrap(True)
-        layout.addWidget(head)
-        code_label = QLabel("")
-        code_font = QFont("Consolas")
-        code_font.setPointSize(22)
-        code_font.setBold(True)
-        code_label.setFont(code_font)
-        code_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(code_label)
-        detail = QLabel("")
-        detail.setWordWrap(True)
-        detail.setOpenExternalLinks(True)
-        layout.addWidget(detail)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
-        worker = LoginWorker(self.cfg, self.accounts, self.cfg.auth.flow, self.cfg.auth.client_id)
-        worker.status.connect(lambda msg: (head.setText(msg), self._append_log(msg)))
-        worker.device_code.connect(
-            lambda code, uri, expires: (code_label.setText(code),
-                                        detail.setText(f"在浏览器打开 <a href='{uri}'>{uri}</a> 并输入上面的代码"
-                                                       f"（{expires // 60} 分钟内有效）")))
-        worker.failed.connect(lambda msg: (dialog.reject(),
-                                           QMessageBox.critical(self, "登录失败", msg),
-                                           self._append_log("登录失败：" + msg)))
-        worker.success.connect(lambda name, uuid: (dialog.accept(),
-                                                   self._append_log(f"登录成功：{name}"),
-                                                   self._refresh_account_bar(),
-                                                   self._warm_token()))
-        worker.finished.connect(worker.deleteLater)
-        dialog.rejected.connect(worker.cancel.cancel)
+        dialog = LoginDialog(self.cfg, self.accounts, self)
+        dialog.succeeded.connect(self._on_login_succeeded)
         self._login_dialog = dialog
-        self._start_worker(worker)
         try:
             dialog.exec()
         finally:
-            worker.cancel.cancel()
             self._login_dialog = None
+
+    @Slot(str, str)
+    def _on_login_succeeded(self, name: str, uuid: str) -> None:
+        self._append_log(f"登录成功：{name}（uuid {uuid[:8]}…）")
+        self._refresh_account_bar()
+        self._warm_token()
+
+    @Slot()
+    def _on_relogin_clicked(self) -> None:
+        self._on_login_clicked(force=True)
 
     def _on_logout(self) -> None:
         selected = self.accounts.selected
@@ -596,14 +569,24 @@ class MainWindow(QMainWindow):
             self._refresh_account_bar()
             return
         worker = TokenWorker(self.accounts)
-        worker.status.connect(lambda msg: self.status.showMessage(msg, 4000))
-        worker.success.connect(
-            lambda name, uuid, remaining: (self._refresh_account_bar(),
-                                           self.status.showMessage(
-                                               f"令牌就绪：{name}（剩余 {remaining // 3600} 小时）", 6000)))
-        worker.failed.connect(lambda msg: (self._append_log(f"⚠ 令牌刷新失败：{msg}"),
-                                           self.status.showMessage("令牌刷新失败", 6000)))
+        worker.status.connect(self._on_token_status)
+        worker.success.connect(self._on_token_success)
+        worker.failed.connect(self._on_token_failed)
         self._start_worker(worker)
+
+    @Slot(str)
+    def _on_token_status(self, message: str) -> None:
+        self.status.showMessage(message, 4000)
+
+    @Slot(str, str, int)
+    def _on_token_success(self, name: str, uuid: str, remaining: int) -> None:
+        self._refresh_account_bar()
+        self.status.showMessage(f"令牌就绪：{name}（剩余 {remaining // 3600} 小时）", 6000)
+
+    @Slot(str)
+    def _on_token_failed(self, message: str) -> None:
+        self._append_log(f"⚠ 令牌刷新失败：{message}")
+        self.status.showMessage("令牌刷新失败", 6000)
 
     # ================================================================= 启动
     def _on_launch(self) -> None:
@@ -624,13 +607,21 @@ class MainWindow(QMainWindow):
         self.accounts.cfg = self.cfg.auth
         self._set_busy(True, "正在准备启动…")
         worker = LaunchWorker(self.cfg, self.accounts)
-        worker.status.connect(lambda msg: self.status.showMessage(msg))
+        worker.status.connect(self._on_launch_status)
         worker.log_line.connect(self._append_log)
         worker.failed.connect(self._on_launch_failed)
         worker.service_ready.connect(self._on_service_ready)
         worker.game_exited.connect(self._on_game_exited)
-        worker.finished.connect(lambda: self._set_busy(False))
+        worker.finished.connect(self._on_launch_finished)
         self._start_worker(worker)
+
+    @Slot(str)
+    def _on_launch_status(self, message: str) -> None:
+        self.status.showMessage(message)
+
+    @Slot()
+    def _on_launch_finished(self) -> None:
+        self._set_busy(False)
 
     def _on_service_ready(self, service: LaunchService) -> None:
         self.service = service
@@ -663,9 +654,9 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "正在清理辅助工具…")
         worker = GameExitWorker(service, ask_handler=lambda name: answers.get(name, True))
         worker.log_line.connect(self._append_log)
-        worker.status.connect(lambda msg: self.status.showMessage(msg))
+        worker.status.connect(self._on_launch_status)
         worker.reports_ready.connect(self._on_reports_ready)
-        worker.finished.connect(lambda: self._set_busy(False))
+        worker.finished.connect(self._on_launch_finished)
         self._start_worker(worker)
 
     def _ask_close_tools(self) -> dict[str, bool] | None:
@@ -715,12 +706,12 @@ class MainWindow(QMainWindow):
             self.status.showMessage(message)
 
     def _start_worker(self, worker) -> QThread:
-        thread = QThread(self)
+        # 线程不挂父对象 + 登记在 _ACTIVE_THREADS：避免"线程还在跑，对象先被销毁"
+        thread = track_thread(QThread())
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(worker.deleteLater)
         self._threads.append(thread)
         thread.start()
         return thread
@@ -735,7 +726,9 @@ class MainWindow(QMainWindow):
             self.service.stop_game()
         if self.service is not None:
             self.service.shutdown()
-        for thread in self._threads:
+        for thread in list(self._threads):
             thread.quit()
-            thread.wait(3000)
+            if not thread.wait(5000):
+                # 不能在这里销毁它：_ACTIVE_THREADS 继续持有，等它自己结束
+                log.warning("后台线程未在 5 秒内结束，保留引用避免 Qt 销毁运行中的线程")
         super().closeEvent(event)

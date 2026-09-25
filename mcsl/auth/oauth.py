@@ -45,7 +45,9 @@ SCOPE = "XboxLive.signin offline_access"
 DEFAULT_CLIENT_ID = "00000000402b5328"
 
 REDIRECT_PORT_CANDIDATES = (29111, 29112, 29113, 29114, 29115)
-REQUEST_TIMEOUT = 30
+# 单次请求超时。刻意取小：代理偶发会重置连接（ConnectionResetError 10054），
+# 卡 30 秒会让 UI 线程看起来"点了没反应"，而且用户取消时会留下一个还在跑的线程。
+REQUEST_TIMEOUT = 15
 MAX_WAIT_SECONDS = 900  # 设备码最多等 15 分钟（HMCL 也是这个上限）
 
 

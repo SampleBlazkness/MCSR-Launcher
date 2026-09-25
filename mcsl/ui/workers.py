@@ -14,6 +14,17 @@ from ..launch.launcher import LaunchService
 
 log = logging.getLogger(__name__)
 
+# 运行中的线程必须有人持有引用：QThread 对象在工作线程还没结束时被回收，
+# Qt 会直接 abort（没有 Python 回溯，日志也断在半路，退出码 127/139）。
+# 统一登记在这里，线程真正结束（finished）后才摘掉。
+_ACTIVE_THREADS: set[QThread] = set()
+
+
+def track_thread(thread: QThread) -> QThread:
+    _ACTIVE_THREADS.add(thread)
+    thread.finished.connect(lambda: _ACTIVE_THREADS.discard(thread))
+    return thread
+
 
 class LaunchWorker(QObject):
     """准备 + 启动游戏（在后台线程执行，避免界面卡死）。"""

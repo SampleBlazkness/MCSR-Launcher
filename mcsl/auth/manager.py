@@ -49,6 +49,20 @@ class AccountManager:
         self.store = store or AccountStore()
         self.http = requests.Session()
         self.http.headers["User-Agent"] = "MCSR-Launcher/0.1 (+https://github.com/SampleBlazkness)"
+        # 代理/网络偶发重置连接（实测见过 ConnectionResetError 10054）。
+        # 只对"连接建立失败"重试（connect=3, read=0）：此时请求根本没发出去，
+        # 重试不会产生副作用；已经发出的请求不重试，避免重复提交。
+        try:
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            retry = Retry(total=3, connect=3, read=0, status=0, backoff_factor=0.8,
+                          allowed_methods=frozenset({"GET", "POST"}), raise_on_status=False)
+            adapter = HTTPAdapter(max_retries=retry)
+            self.http.mount("https://", adapter)
+            self.http.mount("http://", adapter)
+        except Exception as exc:  # noqa: BLE001 - 重试是锦上添花，装不上也要能用
+            log.debug("未能启用 HTTP 重试：%s", exc)
         self._session: MCSession | None = None
 
     # ------------------------------------------------------------ 账号列表
