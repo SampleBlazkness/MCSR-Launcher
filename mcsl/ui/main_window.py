@@ -306,21 +306,19 @@ class MainWindow(QMainWindow):
         self.client_id_edit.setPlaceholderText("Azure 应用的 Application (client) ID")
         self.preset_auth_combo = QComboBox()
         self.preset_auth_combo.addItem("live（login.live.com，配合官方公开 id）", "live")
-        self.preset_auth_combo.addItem("v2（microsoftonline，配合自己注册的应用）", "v2")
         self.flow_combo = QComboBox()
         self.flow_combo.addItem("设备码（显示一个代码，去网页输入）", "device_code")
-        self.flow_combo.addItem("浏览器授权（自动打开浏览器回调）", "auth_code")
 
         form.addRow("client_id", self.client_id_edit)
         form.addRow("端点预设", self.preset_auth_combo)
         form.addRow("登录方式", self.flow_combo)
 
         endpoints_hint = QLabel(
-            "端点预设决定跟哪套微软接口说话：live 走 login.live.com（官方公开 id 就能用，"
-            "当前默认）；v2 走 microsoftonline，必须配你自己注册的 Azure 应用 id —— "
-            "公开 id 在 v2 上会被拒（AADSTS700016）。登录方式只是「怎么把授权拿回来」："
-            "设备码用任意设备输代码（公开 id 走这条）；浏览器授权要回调到本机 127.0.0.1，"
-            "公开 id 没登记这种回调，选它会失败，需要自己注册应用才可用。")
+            "用官方公开 id 时只有「live + 设备码」这一条路走得通，所以下拉框里就只有它："
+            "v2 端点要求 client_id 是你自己注册的 Azure 应用（公开 id 会被拒，AADSTS700016），"
+            "浏览器授权要回调到本机 127.0.0.1，公开 id 也没登记这种回调（实测报 "
+            "redirect_uri is not valid）。把上面的 client_id 换成自己注册的应用 id 之后，"
+            "这两个选项会自动出现在下拉框里。")
         endpoints_hint.setWordWrap(True)
         endpoints_hint.setStyleSheet("color:#8a8a8a;")
         form.addRow("", endpoints_hint)
@@ -349,7 +347,56 @@ class MainWindow(QMainWindow):
         for widget in self.auth_changed_widgets:
             signal = getattr(widget, "textEdited", None) or widget.currentIndexChanged
             signal.connect(self._on_auth_edited)
+        # client_id 一变，下拉框的可用项就要跟着变（用公开 id 时把走不通的选项删掉）。
+        # 打字过程中不重建控件，所以用一个单次定时器做去抖。
+        self._auth_options_timer = QTimer(self)
+        self._auth_options_timer.setSingleShot(True)
+        self._auth_options_timer.setInterval(400)
+        self._auth_options_timer.timeout.connect(self._refresh_auth_options)
+        self.client_id_edit.textEdited.connect(self._schedule_auth_options_refresh)
         return page
+
+    @Slot()
+    def _schedule_auth_options_refresh(self) -> None:
+        self._auth_options_timer.start()
+
+    @Slot()
+    def _refresh_auth_options(self) -> None:
+        """按当前 client_id 决定下拉框里有哪些选项 —— 走不通的直接删掉，而不是留着踩。
+
+        官方公开 id 在微软那边既没有 Azure 应用（v2 端点会拒，AADSTS700016），
+        也没登记 localhost 回调（浏览器授权会报 redirect_uri is not valid），
+        所以只有「live + 设备码」这一条路。填了自己注册的 client_id 后，
+        v2 和浏览器授权会自动回到下拉框里，授权码流程的代码因此不用删。
+        """
+        from ..auth.oauth import DEFAULT_CLIENT_ID
+
+        custom = self.client_id_edit.text().strip() not in ("", DEFAULT_CLIENT_ID)
+        wanted = (
+            (self.preset_auth_combo,
+             [("live（login.live.com，配合官方公开 id）", "live")]
+             + ([("v2（microsoftonline，配合自己注册的应用）", "v2")] if custom else [])),
+            (self.flow_combo,
+             [("设备码（显示一个代码，去网页输入）", "device_code")]
+             + ([("浏览器授权（自动打开浏览器回调）", "auth_code")] if custom else [])),
+        )
+        for combo, items in wanted:
+            if [combo.itemData(i) for i in range(combo.count())] == [d for _, d in items]:
+                continue
+            previous = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for label, data in items:
+                combo.addItem(label, data)
+            index = combo.findData(previous)
+            if index < 0:
+                # 原来是走不通的那个（手改过 config.json 也会到这儿）：退回默认项并说明
+                if previous:
+                    log.warning("登录设置里的 %s 在公开 id 下不可用，已退回到 %s",
+                                previous, combo.itemData(0))
+                index = 0
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
 
     # ================================================================= 载入/保存
     def _load_into_ui(self) -> None:
@@ -390,6 +437,7 @@ class MainWindow(QMainWindow):
             widgets["delay"].setValue(int(tool.start_delay_ms))
 
         self.client_id_edit.setText(cfg.auth.client_id)
+        self._refresh_auth_options()          # 先按 client_id 决定有哪些选项，再选中
         self._select_combo(self.preset_auth_combo, cfg.auth.endpoint_preset)
         self._select_combo(self.flow_combo, cfg.auth.flow)
 

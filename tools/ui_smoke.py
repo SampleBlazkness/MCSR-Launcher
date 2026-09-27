@@ -20,6 +20,7 @@ os.environ["MCSL_NO_ELEVATE"] = "1"   # 测试用：跳过提权自重启
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from PySide6.QtCore import Qt                                     # noqa: E402
 from PySide6.QtWidgets import QApplication                       # noqa: E402
 
 from mcsl.config import load_config, save_config                 # noqa: E402
@@ -130,6 +131,41 @@ def main() -> int:
     check("公开 id + 设备码（当前默认组合）→ 不拦",
           window._browser_flow_problem() is None)
     window.cfg.auth.flow, window.cfg.auth.client_id = old_flow, old_client
+
+    print("\n=== 走不通的选项不该出现在下拉框里 ===")
+    window.client_id_edit.setText("00000000402b5328")
+    window._refresh_auth_options()
+    presets = [window.preset_auth_combo.itemData(i) for i in range(window.preset_auth_combo.count())]
+    flows = [window.flow_combo.itemData(i) for i in range(window.flow_combo.count())]
+    check("公开 id：端点预设只剩 live", presets == ["live"], str(presets))
+    check("公开 id：登录方式只剩设备码", flows == ["device_code"], str(flows))
+
+    window.client_id_edit.setText("11112222-3333-4444-5555-666677778888")
+    window._refresh_auth_options()
+    presets = [window.preset_auth_combo.itemData(i) for i in range(window.preset_auth_combo.count())]
+    flows = [window.flow_combo.itemData(i) for i in range(window.flow_combo.count())]
+    check("填了自己的 client_id 后 v2 与浏览器授权自动回来",
+          presets == ["live", "v2"] and flows == ["device_code", "auth_code"],
+          f"{presets} / {flows}")
+
+    # 手改 config.json 塞进死配置时，载入界面应该自动退回可用项
+    dead = load_config()
+    dead.auth.client_id = "00000000402b5328"
+    dead.auth.endpoint_preset = "v2"
+    dead.auth.flow = "auth_code"
+    window_dead = MainWindow(dead)
+    window_dead.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window_dead.show()
+    app.processEvents()
+    check("手改过的死配置载入后自动退回 live",
+          window_dead.preset_auth_combo.currentData() == "live",
+          str(window_dead.preset_auth_combo.currentData()))
+    check("手改过的死配置载入后自动退回设备码",
+          window_dead.flow_combo.currentData() == "device_code",
+          str(window_dead.flow_combo.currentData()))
+    window_dead.close()
+    window_dead.deleteLater()
+    app.processEvents()
 
     window.close()
     print("=" * 60)
