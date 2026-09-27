@@ -145,6 +145,26 @@ def main() -> int:
     window.close()
     window.deleteLater()
     app.processEvents()
+
+    # ------------------------------------------------ 配置本来就匹配时：绿字、没有替换按钮
+    cfg2 = load_config()
+    cfg2.launch.instance = "1.16.1"
+    cfg2.launch.java_path = str(java8.path)
+    window2 = MainWindow(cfg2)
+    window2.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window2.show()
+    app.processEvents()
+    check("配置匹配时提示是绿字 ✓",
+          "✓" in window2.java_hint.text() and "匹配" in window2.java_hint.text(),
+          window2.java_hint.text()[:90])
+    check("配置匹配时不出现一键替换按钮",
+          not window2.java_fix_button.isVisible(), window2.java_fix_button.text())
+    check("配置匹配时不会拦启动（_confirm_java_version 直接放行）",
+          window2._confirm_java_version() is True)
+    window2.close()
+    window2.deleteLater()
+    app.processEvents()
+
     note(f"\n截图：{SHOTS}")
     note(f"结论：{'全部通过' if not FAILED else '有失败项'}")
     return 1 if FAILED else 0
