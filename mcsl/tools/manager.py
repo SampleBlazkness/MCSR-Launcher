@@ -281,3 +281,9 @@ class ToolManager:
 
     def live_handles(self) -> list[ToolHandle]:
         return [h for h in self.handles.values() if winproc.is_running(h.pid)]
+
+    def is_tool_running(self, name: str) -> bool:
+        handle = self.handles.get(name)
+        if handle is not None and winproc.is_running(handle.pid):
+            return True
+        return bool(self.find_running(name))

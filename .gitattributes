@@ -8,5 +8,6 @@
 *.cmd text eol=crlf
 *.vbs text eol=crlf
 *.jar binary
+*.ico binary
 *.dll binary
 *.png binary

@@ -17,7 +17,7 @@ from pathlib import Path
 # 不设 QT_QPA_PLATFORM：用真实平台插件，字体才正常
 os.environ.pop("QT_QPA_PLATFORM", None)
 os.environ.setdefault("MCSL_DATA_DIR", str(Path(tempfile.gettempdir()) / "mcsl-shot"))
-os.environ["MCSL_ELEVATION_DECLINED"] = "1"
+os.environ["MCSL_NO_ELEVATE"] = "1"   # 测试用：跳过提权自重启
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

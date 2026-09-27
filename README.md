@@ -34,9 +34,13 @@ python -m venv .venv
 
 | 方式 | 说明 |
 | --- | --- |
-| 桌面快捷方式 `MCSR-Launcher.lnk` | **推荐**。指向 `wscript.exe` + `MCSR-Launcher.vbs`，全程不出现 cmd 黑框；`.venv` 缺失时会弹框提示 |
+| 桌面快捷方式 `MCSR-Launcher.lnk` | **推荐**。指向 `wscript.exe` + `MCSR-Launcher.vbs`，全程不出现 cmd 黑框；图标取自 `assets/mcsr-launcher.ico` |
 | `run.cmd` | 双击即可，同样不保留黑框；出错时才会停下来显示文字 |
 | `run-console.cmd` | **带控制台**，报错和日志直接可见，排查问题时用这个 |
+
+启动器**始终以管理员身份启动**（不再询问）：关闭 Jingle / OBS 这类以管理员权限运行的
+工具必须要有管理员权限，否则会被 Windows 的 UIPI 拒绝。如果提权被拒（例如在 UAC 上
+点了「否」），会弹出「启动器需要管理员权限」的警告，可选择重试或仍以普通权限启动。
 
 > **为什么 `.cmd` / `.vbs` 里一个中文都不写**：cmd.exe 用系统 OEM 代码页（中文 Windows 是
 > GBK）读取脚本字节，UTF-8 的中文注释会被错误解码，甚至把下一行的换行符一起吃掉，

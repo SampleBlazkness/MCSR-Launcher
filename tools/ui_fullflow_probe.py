@@ -18,7 +18,7 @@ _fault_file = open(Path(tempfile.gettempdir()) / "mcsl-fullflow-faults.txt", "a"
                    encoding="utf-8", errors="replace")
 faulthandler.enable(file=_fault_file, all_threads=True)
 os.environ["MCSL_DATA_DIR"] = str(Path(tempfile.gettempdir()) / "mcsl-fullflow")
-os.environ["MCSL_ELEVATION_DECLINED"] = "1"
+os.environ["MCSL_NO_ELEVATE"] = "1"   # 测试用：跳过提权自重启
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import QTimer                                  # noqa: E402

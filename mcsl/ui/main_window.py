@@ -42,6 +42,7 @@ class MainWindow(QMainWindow):
         self._threads: list[QThread] = []
         self._login_dialog: QDialog | None = None
         self._busy = False
+        self._saved_snapshot: dict = {}
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.resize(980, 720)
@@ -57,6 +58,13 @@ class MainWindow(QMainWindow):
         self._load_into_ui()
         self._refresh_instances(reload_only=True)
         self._loading = False
+        # 保存按钮只在配置真的变了才可点；改回原样也要重新变灰。
+        # 用轮询而不是逐个信号连接：控件太多，漏一个就会出现"改了不变灰"。
+        self._mark_saved()
+        self._dirty_timer = QTimer(self)
+        self._dirty_timer.setInterval(400)
+        self._dirty_timer.timeout.connect(self._refresh_save_button)
+        self._dirty_timer.start()
         QTimer.singleShot(200, self._warm_token)
 
     # ================================================================= 界面
@@ -224,10 +232,12 @@ class MainWindow(QMainWindow):
 
         behaviour = QGroupBox("行为")
         bform = QFormLayout(behaviour)
-        self.elevate_check = QCheckBox("以管理员身份运行启动器（推荐：否则关不掉 Jingle 这类提权工具）")
-        self.show_console_check = QCheckBox("显示游戏控制台窗口（调试用）")
+        elevated_note = QLabel("始终以管理员身份启动（关闭 Jingle / OBS 这类提权工具需要它；"
+                               "若提权被拒会给出警告）")
+        elevated_note.setWordWrap(True)
+        self.show_console_check = QCheckBox("显示游戏控制台窗口（调试用；游戏输出始终写入日志文件）")
         self.close_game_check = QCheckBox("关闭启动器时一并结束 Minecraft")
-        bform.addRow(self.elevate_check)
+        bform.addRow(elevated_note)
         bform.addRow(self.show_console_check)
         bform.addRow(self.close_game_check)
         layout.addWidget(behaviour)
@@ -335,7 +345,7 @@ class MainWindow(QMainWindow):
         self.width_spin.setValue(int(launch.width or 0))
         self.height_spin.setValue(int(launch.height or 0))
 
-        self.elevate_check.setChecked(cfg.elevate)
+        self.elevate_check = None      # 已改为始终提权，界面上不再提供开关
         self.show_console_check.setChecked(cfg.show_console)
         self.close_game_check.setChecked(cfg.close_game_on_launcher_exit)
 
@@ -393,7 +403,7 @@ class MainWindow(QMainWindow):
         if target_launch.java_path and not cfg.launch.java_path:
             cfg.launch.java_path = target_launch.java_path
 
-        cfg.elevate = self.elevate_check.isChecked()
+        cfg.elevate = True             # 始终提权（界面不再提供开关）
         cfg.show_console = self.show_console_check.isChecked()
         cfg.close_game_on_launcher_exit = self.close_game_check.isChecked()
 
@@ -414,10 +424,30 @@ class MainWindow(QMainWindow):
     def _on_save_clicked(self) -> None:
         try:
             path = save_config(self._collect_from_ui())
+            self._mark_saved()
             self._append_log(f"配置已保存到 {path}")
             self.status.showMessage("配置已保存", 3000)
         except OSError as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
+
+    # ------------------------------------------------------------ 配置脏检测
+    def _mark_saved(self) -> None:
+        """把当前控件状态记为"已保存"基准，并刷新保存按钮。"""
+        self._saved_snapshot = self._collect_from_ui().to_dict()
+        self._refresh_save_button()
+
+    def _is_dirty(self) -> bool:
+        try:
+            return self._collect_from_ui().to_dict() != self._saved_snapshot
+        except Exception:  # noqa: BLE001 - 控件状态异常时不要把按钮卡住
+            log.debug("脏检测失败", exc_info=True)
+            return True
+
+    def _refresh_save_button(self) -> None:
+        dirty = self._is_dirty()
+        if self.save_button.isEnabled() != dirty:
+            self.save_button.setEnabled(dirty)
+        self.save_button.setToolTip("有未保存的修改" if dirty else "配置与已保存的一致")
 
     # ================================================================= 交互
     def _on_path_changed(self) -> None:
@@ -621,6 +651,7 @@ class MainWindow(QMainWindow):
             save_config(self.cfg)
         except OSError as exc:
             self._append_log(f"⚠ 配置保存失败（仍会继续）：{exc}")
+        self._mark_saved()
         if self.accounts.selected is None:
             if QMessageBox.question(self, "还没有登录",
                                     "还没有登录微软账号，无法获取 access_token。现在去登录吗？") \
@@ -683,12 +714,19 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_launch_finished)
         self._start_worker(worker)
 
-    def _ask_close_tools(self) -> dict[str, bool] | None:
-        """在游戏退出后询问（只对配置为"询问"的工具弹窗）。"""
+    def _ask_close_tools(self, only_running: bool = True) -> dict[str, bool] | None:
+        """在游戏退出后询问（只对配置为"询问"的工具弹窗）。
+
+        only_running=True 时跳过本来就没在跑的工具，避免问一些无意义的问题。
+        """
         answers: dict[str, bool] = {}
         for name in ("jingle", "ninjabrainbot", "obs"):
             tool = self.cfg.tools.get(name)
             if tool is None or tool.close_on_exit != CLOSE_ASK:
+                continue
+            if only_running and self.service is not None \
+                    and not self.service.tools.is_tool_running(name):
+                log.debug("%s 未在运行，跳过询问", name)
                 continue
             label = TOOL_LABELS.get(name, name)
             box = QMessageBox(self)
@@ -696,11 +734,10 @@ class MainWindow(QMainWindow):
             box.setText(f"游戏已退出。要关闭 {label} 吗？")
             box.setInformativeText(f"（{label} 的退出策略设为“退出时询问”，可在“辅助工具”页改成固定行为）")
             close_btn = box.addButton(f"关闭 {label}", QMessageBox.ButtonRole.AcceptRole)
-            keep_btn = box.addButton(f"保留 {label}", QMessageBox.ButtonRole.RejectRole)
+            box.addButton(f"保留 {label}", QMessageBox.ButtonRole.RejectRole)
             box.setDefaultButton(close_btn)
             box.exec()
             answers[name] = box.clickedButton() is close_btn
-            del keep_btn
         return answers
 
     def _on_reports_ready(self, reports: list) -> None:
@@ -750,13 +787,40 @@ class MainWindow(QMainWindow):
             save_config(self.cfg)
         except OSError:
             pass
-        if self.service is not None and self.service.game_running and self.cfg.close_game_on_launcher_exit:
-            self.service.stop_game()
-        if self.service is not None:
-            self.service.shutdown()
+
+        service = self.service
+        if service is not None:
+            if service.game_running:
+                # 游戏还在跑：不动任何辅助工具，免得关个启动器窗口就把 Jingle 关掉
+                log.info("游戏仍在运行，退出启动器时保留全部辅助工具")
+                if self.cfg.close_game_on_launcher_exit:
+                    service.stop_game()
+            else:
+                # 游戏已退出：该问的必须问（以前这里静默跳过 ask 策略，
+                # 用户看到的现象就是"OBS 关不掉"）
+                answers = self._ask_close_tools(only_running=True)
+                reports = self._close_tools_by_plan(service, answers)
+                for report in reports:
+                    log.info("退出清理：%s", report.summary())
+
         for thread in list(self._threads):
             thread.quit()
             if not thread.wait(5000):
                 # 不能在这里销毁它：_ACTIVE_THREADS 继续持有，等它自己结束
                 log.warning("后台线程未在 5 秒内结束，保留引用避免 Qt 销毁运行中的线程")
         super().closeEvent(event)
+
+    def _close_tools_by_plan(self, service: LaunchService, answers: dict[str, bool]) -> list:
+        """按配置与实际运行状态决定关谁：always 直接关，ask 看用户回答。"""
+        plan: dict[str, str] = {}
+        for name in ("ninjabrainbot", "jingle", "obs"):
+            tool = self.cfg.tools.get(name)
+            if tool is None or not service.tools.is_tool_running(name):
+                continue
+            if tool.close_on_exit == CLOSE_ALWAYS:
+                plan[name] = CLOSE_ALWAYS
+            elif tool.close_on_exit == CLOSE_ASK and answers.get(name):
+                plan[name] = CLOSE_ALWAYS
+        if not plan:
+            return []
+        return service.tools.stop_all(plan, allow_elevate=not self.cfg.elevate)

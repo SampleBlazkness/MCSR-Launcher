@@ -17,14 +17,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-# 段错误没有 Python 回溯，faulthandler 能在崩溃时打出 C 层的调用栈
+# 段错误没有 Python 回溯，faulthandler 能在崩溃时打出 C 层的调用栈。
+# 必须指定文件：pythonw 下没有有效 stderr 时 faulthandler.enable() 会直接抛异常。
 import faulthandler
 
-faulthandler.enable()
+_fault_file = open(Path(tempfile.gettempdir()) / "mcsl-loginprobe-faults.txt", "a",
+                   encoding="utf-8", errors="replace")
+faulthandler.enable(file=_fault_file, all_threads=True)
 
 # 独立数据目录 + 不提权，避免动到真实配置与账号
 os.environ.setdefault("MCSL_DATA_DIR", str(Path(tempfile.gettempdir()) / "mcsl-loginprobe"))
-os.environ["MCSL_ELEVATION_DECLINED"] = "1"
+os.environ["MCSL_NO_ELEVATE"] = "1"   # 测试用：跳过提权自重启
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -35,25 +38,32 @@ from mcsl.config import load_config                                # noqa: E402
 from mcsl.logging_setup import setup                               # noqa: E402
 from mcsl.ui.main_window import MainWindow                         # noqa: E402
 
-MARK = {}
+MARK: dict = {}
+# 探针自己的输出写文件：pythonw 下没有 stdout/stderr，print 全部会丢
+LOG = Path(tempfile.gettempdir()) / "mcsl-login-probe.txt"
 
 
 def main() -> int:
-    early = "--early" in sys.argv        # 请求还没返回就取消（曾经的崩溃场景）
+    early = "--early" in sys.argv     # 请求还没返回就取消（曾经的崩溃场景）
     setup()
     app = QApplication(sys.argv[:1])
     window = MainWindow(load_config())
     window.show()
+    LOG.unlink(missing_ok=True)
+
+    def note(text: str) -> None:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
 
     def click_login() -> None:
-        print(">>> 点击登录按钮", flush=True)
+        note(">>> 点击登录按钮")
         window.login_button.click()
 
     def check_dialog() -> None:
         dialogs = [w for w in app.topLevelWidgets()
                    if isinstance(w, QDialog) and w.isVisible()]
         if not dialogs:
-            print(">>> [FAIL] 没有出现登录对话框（可能已经崩了）", flush=True)
+            note(">>> [FAIL] 没有出现登录对话框（可能已经崩了）")
             MARK["failed"] = True
             app.quit()
             return
@@ -61,13 +71,13 @@ def main() -> int:
         code = getattr(dialog, "code_label", None)
         text = code.text() if code is not None else ""
         if text:
-            print(f">>> [ok] 设备码对话框正常显示：{text}", flush=True)
+            note(f">>> [ok] 设备码对话框正常显示：{text}")
         else:
-            print(">>> [FAIL] 对话框出现了但没拿到设备码", flush=True)
-            MARK["failed"] = True
-        print(">>> 关闭对话框（取消登录）", flush=True)
+            # 12 秒内没拿到设备码：网络慢或被代理重置，不算崩溃
+            note(">>> [warn] 对话框出现了但还没拿到设备码（网络慢）")
+        note(">>> 关闭对话框（取消登录）")
         dialog.reject()
-        print(">>> reject 返回", flush=True)
+        note(">>> reject 返回")
         QTimer.singleShot(1500, probe_alive)
 
     def cancel_early() -> None:
@@ -75,19 +85,19 @@ def main() -> int:
         dialogs = [w for w in app.topLevelWidgets()
                    if isinstance(w, QDialog) and w.isVisible()]
         if dialogs:
-            print(">>> 设备码还没回来就取消登录", flush=True)
+            note(">>> 设备码还没回来就取消登录")
             dialogs[0].reject()
-            print(">>> reject 返回（请求仍在后台）", flush=True)
+            note(">>> reject 返回（请求仍在后台）")
             QTimer.singleShot(3000, probe_alive)
         else:
-            print(">>> [FAIL] 没有对话框可取消", flush=True)
+            note(">>> [FAIL] 没有对话框可取消")
             MARK["failed"] = True
 
     def probe_alive() -> None:
-        print(">>> [ok] 取消之后进程仍存活", flush=True)
+        note(">>> [ok] 取消之后进程仍存活")
 
     def finish() -> None:
-        print(">>> 结束探针", flush=True)
+        note(">>> 结束探针")
         app.quit()
 
     QTimer.singleShot(500, click_login)
@@ -98,6 +108,7 @@ def main() -> int:
         QTimer.singleShot(12000, check_dialog)
         QTimer.singleShot(20000, finish)
     app.exec()
+    note(f">>> 退出码标记 failed={bool(MARK.get('failed'))}")
     return 1 if MARK.get("failed") else 0
 
 

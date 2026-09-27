@@ -32,6 +32,11 @@ def data_root() -> Path:
     return Path.home() / ".local" / "share" / APP_NAME
 
 
+def icon_path() -> Path:
+    """仓库里的图标（tools/make_icon.py 从 Minecraft 客户端 jar 提取生成）。"""
+    return project_root() / "assets" / "mcsr-launcher.ico"
+
+
 def config_file() -> Path:
     """用户配置文件（覆盖 defaults.json，不进 git）。"""
     return data_root() / "config.json"

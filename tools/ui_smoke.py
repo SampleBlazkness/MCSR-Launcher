@@ -16,7 +16,7 @@ from pathlib import Path
 # 离屏 + 独立数据目录（不碰真实配置）
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MCSL_DATA_DIR", str(Path(tempfile.gettempdir()) / "mcsl-smoke"))
-os.environ["MCSL_ELEVATION_DECLINED"] = "1"
+os.environ["MCSL_NO_ELEVATE"] = "1"   # 测试用：跳过提权自重启
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -57,6 +57,23 @@ def main() -> int:
     check("追加参数框显示了调参", "-XX:+UseG1GC" in window.extra_args_edit.text())
     check("工具关闭策略载入（OBS=询问）",
           next(w["close"].currentData() for n, w in window.tool_widgets.items() if n == "obs") == "ask")
+
+    print("\n=== 保存按钮的脏检测 ===")
+    check("刚打开时保存按钮是灰的", not window.save_button.isEnabled(),
+          f"enabled={window.save_button.isEnabled()}")
+    before = window.memory_spin.value()
+    window.memory_spin.setValue(before + 512)
+    window._refresh_save_button()
+    check("改了配置后按钮变为可点", window.save_button.isEnabled())
+    window.memory_spin.setValue(before)
+    window._refresh_save_button()
+    check("改回原样后按钮又变灰", not window.save_button.isEnabled())
+    window.extra_args_edit.setText(window.extra_args_edit.text() + " ")
+    window._refresh_save_button()
+    check("只加一个空格也算改动", window.save_button.isEnabled())
+    window.extra_args_edit.setText(window.extra_args_edit.text().rstrip())
+    window._refresh_save_button()
+    check("去掉那个空格后再次变灰", not window.save_button.isEnabled())
 
     print("\n=== 控件改动是否写回配置 ===")
     window.memory_spin.setValue(6144)

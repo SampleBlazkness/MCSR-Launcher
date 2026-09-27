@@ -83,6 +83,7 @@ def run(argv: list[str] | None = None) -> int:
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("MCSR-Launcher")
     _install_diagnostics()
+    _install_icon(app)
 
     if not _maybe_relaunch_elevated(cfg, QMessageBox):
         return 0
@@ -92,33 +93,73 @@ def run(argv: list[str] | None = None) -> int:
     return app.exec()
 
 
+def _install_icon(app) -> None:
+    """设置窗口/任务栏图标（来自 Minecraft 客户端自带的 pack.png）。"""
+    from PySide6.QtGui import QIcon
+
+    from ..paths import icon_path
+
+    path = icon_path()
+    if path.is_file():
+        icon = QIcon(str(path))
+        if not icon.isNull():
+            app.setWindowIcon(icon)
+            log.debug("已设置窗口图标：%s", path)
+        else:
+            log.warning("图标文件无法解析：%s", path)
+    else:
+        log.info("没有图标文件（可运行 tools/make_icon.py 生成）：%s", path)
+
+
 def _maybe_relaunch_elevated(cfg, message_box) -> bool:
-    """需要提权时询问并自重启。返回 False 表示"本进程应该直接退出"。"""
-    if not winproc.is_windows() or not cfg.elevate or winproc.is_self_elevated():
+    """始终以管理员身份启动（不再询问）。
+
+    返回 False 表示本进程应该直接退出（提权被拒且用户选择退出）。
+    """
+    if not winproc.is_windows() or winproc.is_self_elevated():
         return True
-    if os.environ.get("MCSL_ELEVATION_DECLINED") == "1":
+    # 测试/无头调试用逃生口（正常使用永远不会设置它）
+    if os.environ.get("MCSL_NO_ELEVATE") == "1":
+        log.debug("MCSL_NO_ELEVATE=1，跳过提权")
+        cfg.elevate = False
         return True
 
-    answer = message_box.question(
-        None, "是否以管理员身份运行？",
-        "关闭 Jingle 这类“以管理员身份启动”的辅助工具需要本程序也具备管理员权限\n"
-        "（否则 Windows 的 UIPI 会直接拒绝关闭请求，就像你原来的脚本那样）。\n\n"
-        "现在以管理员身份重新启动？（UAC 已设为始终允许的话不会弹窗）\n\n"
-        "选“否”会以普通权限继续运行，退出时只能靠提权 taskkill 补刀。",
-        message_box.StandardButton.Yes | message_box.StandardButton.No,
-        message_box.StandardButton.Yes,
-    )
-    if answer != message_box.StandardButton.Yes:
-        os.environ["MCSL_ELEVATION_DECLINED"] = "1"
-        return True
-
+    # 直接请求提权重启，不弹询问框
     pid, error = winproc.shell_execute(
         _python_launcher(), ["-m", "mcsl"],
         cwd=str(project_root()), elevate=True)
-    if pid == 0:
-        message_box.warning(None, "提权失败", f"无法以管理员身份重启：{error}\n将以普通权限继续运行。")
+    if pid != 0:
+        log.info("已以管理员身份重启（PID %d），本进程退出", pid)
+        return False
+
+    # 提权失败：常见原因是用户在 UAC 上点了"否"（错误码 1223）
+    log.warning("提权启动失败：%s", error)
+    denied = "1223" in error or "取消" in error
+    detail = ("你在 UAC 提示上选择了“否”。" if denied else error)
+    box = message_box()
+    box.setIcon(message_box.Icon.Critical)
+    box.setWindowTitle("需要管理员权限")
+    box.setText("启动器需要管理员权限")
+    box.setInformativeText(
+        f"{detail}\n\n"
+        "没有管理员权限时：\n"
+        "· 无法关闭 Jingle / OBS 这类以管理员身份运行的工具（Windows 的 UIPI 会拒绝）\n"
+        "· 游戏本身仍可启动，但退出后的清理会不完整\n\n"
+        "请选择“重试”重新请求提权，或“仍以普通权限启动”。")
+    retry = box.addButton("重试", message_box.ButtonRole.AcceptRole)
+    limited = box.addButton("仍以普通权限启动", message_box.ButtonRole.DestructiveRole)
+    box.addButton("退出", message_box.ButtonRole.RejectRole)
+    box.setDefaultButton(retry)
+    box.exec()
+
+    chosen = box.clickedButton()
+    if chosen is retry:
+        return _maybe_relaunch_elevated(cfg, message_box)
+    if chosen is limited:
+        log.warning("用户选择以普通权限继续运行（清理功能受限）")
+        cfg.elevate = False
         return True
-    log.info("已请求以管理员身份重启（PID %d），本进程退出", pid)
+    log.info("用户选择退出（未取得管理员权限）")
     return False
 
 
