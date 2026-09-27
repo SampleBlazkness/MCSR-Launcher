@@ -7,9 +7,9 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-                               QPushButton, QSpinBox, QStatusBar, QTabWidget,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFormLayout,
+                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+                               QMessageBox, QPushButton, QSpinBox, QStatusBar, QTabWidget,
                                QVBoxLayout, QWidget)
 
 from .. import APP_NAME, APP_VERSION
@@ -823,4 +823,7 @@ class MainWindow(QMainWindow):
                 plan[name] = CLOSE_ALWAYS
         if not plan:
             return []
+        # 关工具要等它自己退出，可能好几秒。先说清楚在干什么，别让人以为界面卡死了。
+        self.status.showMessage("正在关闭辅助工具，请稍候…")
+        QApplication.processEvents()
         return service.tools.stop_all(plan, allow_elevate=not self.cfg.elevate)
