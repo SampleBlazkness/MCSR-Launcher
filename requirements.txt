@@ -10,4 +10,5 @@ PySide6-Essentials>=6.6    # GUI（LGPL：动态链接使用，分发时附许�
 requests>=2.31             # OAuth / Xbox Live / Minecraft Services 的 HTTPS 调用
 
 # 开发期可选
+# Pillow>=10                # 只有 tools/make_icon.py 生成多尺寸 .ico 时用得到，运行时不需要
 # pyinstaller>=6.0         # 之后打包单文件 exe 用
