@@ -62,7 +62,7 @@ class LaunchService:
     def prepare(self, *, force_refresh: bool = False,
                 on_game_exit: ExitCb | None = None) -> tuple[MinecraftVersion, Command]:
         # 应用实例级覆盖（内存、JVM 参数等可以按实例区分）
-        cfg = self.cfg.launch.effective()
+        cfg = self.cfg.launch
         mc_dir = Path(cfg.minecraft_dir) if cfg.minecraft_dir else None
         if not mc_dir or not mc_dir.is_dir():
             raise FileNotFoundError(f".minecraft 目录不存在：{cfg.minecraft_dir!r}")

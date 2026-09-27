@@ -106,7 +106,7 @@ def cmd_instances(cfg) -> int:
 
 
 def cmd_dump(cfg, args) -> int:
-    launch_cfg = cfg.launch.effective(args.instance)
+    launch_cfg = cfg.launch
     mc_dir = Path(launch_cfg.minecraft_dir)
     version = load_version(mc_dir, launch_cfg.instance)
     session = FakeSession(cfg.auth.client_id)
@@ -187,7 +187,7 @@ def cmd_launch(cfg, args) -> int:
 
     from .launch.launcher import LaunchService
 
-    launch_cfg = cfg.launch.effective(args.instance)
+    launch_cfg = cfg.launch
     cfg.launch = launch_cfg
     mgr = AccountManager(cfg.auth)
     service = LaunchService(cfg, mgr, on_log=lambda m: print("  " + m),

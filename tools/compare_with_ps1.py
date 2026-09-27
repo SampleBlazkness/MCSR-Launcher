@@ -57,7 +57,7 @@ def main() -> int:
     ps1_path, instance = Path(sys.argv[1]), sys.argv[2]
 
     cfg = load_config()
-    launch_cfg = cfg.launch.effective(instance)
+    launch_cfg = cfg.launch
 
     class Fake:
         name, uuid = "Blazkness", "f86a3ab6163c420197e5dfc196f6fd91"

@@ -115,7 +115,6 @@ def main() -> int:
     # ------------------------------------------------ 主窗口：比声明【高】不报警（本机真实情况）
     cfg = load_config()
     cfg.launch.instance = "1.16.1"          # 版本 JSON 声明 Java 8
-    cfg.launch.instances.pop("1.16.1", None)   # 前面用例可能已写进实例覆盖
     cfg.launch.java_path = str(java_high.path)   # 实际用 Java 25，这才是对的
     window = MainWindow(cfg)
     window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
@@ -130,14 +129,11 @@ def main() -> int:
     check("比声明高时不拦启动", window._confirm_java_version() is True)
     window.grab().save(str(SHOTS / "launch_page_java_newer.png"))
 
-    # 每实例存储：勾上"只对当前实例生效"后，java 应写进实例覆盖而不是全局
-    window.per_instance_check.setChecked(True)
-    app.processEvents()
+    # Java 是全局设置（按实例覆盖功能已按用户要求删除）
     collected = window._collect_from_ui()
-    override = collected.launch.instances.get("1.16.1")
-    check("每实例模式下 Java 存进实例覆盖",
-          override is not None and override.java_path == str(java_high.path),
-          f"override.java_path={getattr(override, 'java_path', None)}")
+    check("选中的 Java 写进全局设置",
+          collected.launch.java_path == str(java_high.path),
+          f"java_path={collected.launch.java_path}")
 
     window.close()
     window.deleteLater()
@@ -146,9 +142,6 @@ def main() -> int:
     # ------------------------------------------------ 声明相符时：绿字、没有替换按钮
     cfg2 = load_config()
     cfg2.launch.instance = "1.16.1"
-    # 注意：上面那个窗口 close() 时会把配置存盘（closeEvent 里 save_config），
-    # 所以这里必须把实例覆盖清掉，否则读到的还是上一个用例写进去的 Java 25
-    cfg2.launch.instances.pop("1.16.1", None)
     cfg2.launch.java_path = str(java8.path)
     window2 = MainWindow(cfg2)
     window2.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
@@ -168,9 +161,6 @@ def main() -> int:
     from mcsl.launch.java import read_install_cached, version_state
     cfg3 = load_config()
     cfg3.launch.instance = "26.3-Fabric"      # 版本 JSON 声明 Java 25
-    # 26.3-Fabric 在 defaults.json 里有自己的实例覆盖（java 指向 zulu-25），
-    # 先去掉，让它落到全局设置，才好构造"配了 Java 8"这种偏低的情况
-    cfg3.launch.instances.pop("26.3-Fabric", None)
     cfg3.launch.java_path = str(java8.path)   # 配了 Java 8 → 偏低
     window3 = MainWindow(cfg3)
     window3.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)

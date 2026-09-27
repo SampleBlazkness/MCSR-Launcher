@@ -8,7 +8,8 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from dataclasses import asdict, dataclass, field, replace
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -56,23 +57,6 @@ class AuthConfig:
 
 
 @dataclass
-class InstanceOverride:
-    """针对单个实例的覆盖项（config.json 里的 launch.instances["<实例名>"]）。
-
-    None = 沿用全局设置。以后要在界面上做"每个实例一套 JVM 参数"时，
-    数据层已经就位，不用改配置格式。
-    """
-    memory_mb: int | None = None
-    jvm_preset: str | None = None
-    jvm_args_extra: str | None = None
-    game_args_extra: str | None = None
-    java_path: str | None = None
-    width: int | None = None
-    height: int | None = None
-    version_type: str | None = None
-
-
-@dataclass
 class LaunchConfig:
     """游戏启动配置。"""
     minecraft_dir: str = ""              # .minecraft 目录
@@ -86,20 +70,8 @@ class LaunchConfig:
     width: int = 0                       # 0 = 不传，交给游戏自身设置
     height: int = 0
     env_overrides: dict[str, str] = field(default_factory=dict)  # 空 = 自动设 APPDATA
-    instances: dict[str, InstanceOverride] = field(default_factory=dict)
-
-    def effective(self, instance: str | None = None) -> "LaunchConfig":
-        """返回应用了实例覆盖项之后的副本。"""
-        instance = instance or self.instance
-        override = self.instances.get(instance)
-        if override is None:
-            return replace(self, instance=instance, instances={})
-        merged = replace(self, instance=instance, instances={})
-        for field_name in InstanceOverride.__dataclass_fields__:
-            value = getattr(override, field_name)
-            if value is not None:
-                setattr(merged, field_name, value)
-        return merged
+    # 注意：这里曾经有"按实例覆盖"（launch.instances），已按用户要求移除 ——
+    # 所有实例共用同一套设置。旧配置里的 instances 会在 load_config 里备份后忽略。
 
 
 @dataclass
@@ -123,12 +95,8 @@ class AppConfig:
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
         auth = AuthConfig(**_pick(data.get("auth") or {}, AuthConfig))
         launch_raw = dict(data.get("launch") or {})
-        instances_raw = launch_raw.pop("instances", {}) or {}
+        launch_raw.pop("instances", None)      # 已移除的功能，忽略（备份在 load_config 里做）
         launch = LaunchConfig(**_pick(launch_raw, LaunchConfig))
-        launch.instances = {
-            name: InstanceOverride(**_pick(cfg or {}, InstanceOverride))
-            for name, cfg in instances_raw.items()
-        }
         tools = {name: ToolConfig(**_pick(cfg or {}, ToolConfig)).normalized()
                  for name, cfg in (data.get("tools") or {}).items()}
         for name, default in (("obs", CLOSE_ASK), ("jingle", CLOSE_ALWAYS), ("ninjabrainbot", CLOSE_ALWAYS)):
@@ -158,6 +126,47 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+_legacy_overrides_backed_up = False
+
+
+def _backup_legacy_overrides(data: dict[str, Any]) -> None:
+    """旧配置里有「按实例覆盖」时先备份再忽略，避免静默丢用户调过的参数。
+
+    那个功能已按用户要求删除（所有实例共用一套设置）。这里只做一次：把用户
+    config.json 原样复制成 config.json.bak-<时间戳>，并在日志里说清哪些实例的
+    设置不再生效，用户想找回随时能看。
+    """
+    global _legacy_overrides_backed_up
+    if _legacy_overrides_backed_up:
+        return
+    overrides = (data.get("launch") or {}).get("instances") or {}
+    if not overrides:
+        return
+    _legacy_overrides_backed_up = True
+    names = "、".join(overrides)
+    cf = config_file()
+    try:
+        if not cf.exists():
+            log.warning("默认配置里的实例覆盖（%s）已随功能移除而失效", names)
+            return
+        # 备份名用**配置文件自己的修改时间**：每次启动（含提权的子进程）都会走到这里，
+        # 用"当前时间"命名会一路生成一堆内容相同的 .bak；用 mtime 命名则同一份配置
+        # 只会留一个备份，配置真的改过之后才会再生成新的。
+        try:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(cf.stat().st_mtime))
+        except OSError:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = cf.with_name(f"{cf.name}.bak-{stamp}")
+        if backup.exists():
+            log.debug("实例覆盖的备份已存在：%s", backup.name)
+            return
+        backup.write_text(cf.read_text(encoding="utf-8"), encoding="utf-8")
+        log.warning("「按实例覆盖设置」功能已移除：%s 里的实例设置（%s）不再生效；"
+                    "原配置已备份到 %s", cf.name, names, backup)
+    except OSError as exc:
+        log.warning("备份旧配置失败（继续用全局设置启动）：%s", exc)
+
+
 def load_config() -> AppConfig:
     data: dict[str, Any] = {}
     try:
@@ -171,6 +180,7 @@ def load_config() -> AppConfig:
             data = _deep_merge(data, json.loads(cf.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("读取用户配置失败：%s", exc)
+    _backup_legacy_overrides(data)
     return AppConfig.from_dict(data)
 
 

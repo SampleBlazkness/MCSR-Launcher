@@ -231,7 +231,6 @@ class MainWindow(QMainWindow):
             self.preset_combo.addItem(label, value)
         self.extra_args_edit = QLineEdit()
         self.extra_args_edit.setPlaceholderText("-XX:+UseG1GC -Dfile.encoding=GB18030 …")
-        self.per_instance_check = QCheckBox("上面的内存/JVM 参数只对当前实例生效")
         self.width_spin = QSpinBox()
         self.height_spin = QSpinBox()
         for spin in (self.width_spin, self.height_spin):
@@ -253,7 +252,6 @@ class MainWindow(QMainWindow):
         self.jvm_hint.setWordWrap(True)
         self.jvm_hint.setStyleSheet("color:#8a8a8a;")
         form.addRow("", self.jvm_hint)
-        form.addRow("", self.per_instance_check)
         form.addRow("窗口分辨率", res_widget)
         layout.addWidget(base)
 
@@ -275,7 +273,6 @@ class MainWindow(QMainWindow):
         self.extra_args_edit.textChanged.connect(self._refresh_jvm_hint)
         self.memory_spin.valueChanged.connect(self._on_jvm_edited)
         self.extra_args_edit.textEdited.connect(self._on_jvm_edited)
-        self.per_instance_check.toggled.connect(self._on_per_instance_toggled)
         return page
 
     def _build_tools_tab(self) -> QWidget:
@@ -286,7 +283,7 @@ class MainWindow(QMainWindow):
             box = QGroupBox(TOOL_LABELS.get(name, name))
             form = QFormLayout(box)
             enable = QCheckBox("启动游戏时一起启动")
-            elevate = QCheckBox("以管理员身份启动" + ("（Jingle 需要）" if name == "jingle" else ""))
+            elevate = QCheckBox("以管理员身份启动")
             close_combo = QComboBox()
             for label, value in CLOSE_CHOICES:
                 close_combo.addItem(label, value)
@@ -394,7 +391,7 @@ class MainWindow(QMainWindow):
 
     def _load_into_ui_inner(self) -> None:
         cfg = self.cfg
-        launch = cfg.launch.effective(cfg.launch.instance)
+        launch = cfg.launch
         self.picker_mc.set_value(cfg.launch.minecraft_dir)
         self.picker_java.set_value(launch.java_path)
         self.picker_njb.set_value(cfg.tools.get("ninjabrainbot").path if cfg.tools.get("ninjabrainbot") else "")
@@ -404,7 +401,6 @@ class MainWindow(QMainWindow):
         self.memory_spin.setValue(int(launch.memory_mb or 4096))
         self._select_combo(self.preset_combo, launch.jvm_preset)
         self.extra_args_edit.setText(launch.jvm_args_extra or "")
-        self.per_instance_check.setChecked(cfg.launch.instance in cfg.launch.instances)
         self.width_spin.setValue(int(launch.width or 0))
         self.height_spin.setValue(int(launch.height or 0))
 
@@ -459,31 +455,16 @@ class MainWindow(QMainWindow):
             if tool is not None:
                 tool.path = picker.value()
 
-        target_launch = cfg.launch.effective(cfg.launch.instance)
-        values = {
+        # 所有实例共用一套设置（"按实例覆盖"那个功能已按用户要求删除）
+        for key, value in {
             "memory_mb": self.memory_spin.value(),
             "jvm_preset": self.preset_combo.currentData(),
             "jvm_args_extra": self.extra_args_edit.text(),
             "width": self.width_spin.value(),
             "height": self.height_spin.value(),
-            # Java 也走这套：勾了"只对当前实例生效"就存进实例覆盖，否则存全局。
-            # 这台机器上两个实例需要不同 Java（1.16.1 要 8、26.3 要 25），
-            # 以前这里把界面上的 Java 直接忽略掉，等于改了不生效。
             "java_path": self.picker_java.value(),
-        }
-        if self.per_instance_check.isChecked():
-            from ..config import InstanceOverride
-
-            override = cfg.launch.instances.get(cfg.launch.instance) or InstanceOverride()
-            for key, value in values.items():
-                setattr(override, key, value)
-            cfg.launch.instances[cfg.launch.instance] = override
-        else:
-            for key, value in values.items():
-                setattr(cfg.launch, key, value)
-            cfg.launch.instances.pop(cfg.launch.instance, None)
-        if target_launch.java_path and not cfg.launch.java_path:
-            cfg.launch.java_path = target_launch.java_path
+        }.items():
+            setattr(cfg.launch, key, value)
 
         cfg.elevate = True             # 始终提权（界面不再提供开关）
         cfg.show_console = self.show_console_check.isChecked()
@@ -579,11 +560,7 @@ class MainWindow(QMainWindow):
         self._refresh_java_hint()
 
     def _apply_java_choice(self, install) -> None:
-        """把选中的 Java 写进界面，并按"每实例"开关决定存到哪儿。
-
-        存法要和 _collect_from_ui 一致：勾了"只对当前实例生效"就写进实例覆盖，
-        否则写全局 —— 两个实例需要不同 Java（1.16.1 要 8、26.3 要 25）时靠这个区分。
-        """
+        """把选中的 Java 写进界面（Java 路径是全局设置，与 _collect_from_ui 一致）。"""
         self.picker_java.set_value(str(install.path))
 
     def _on_java_quickfix(self) -> None:
@@ -730,15 +707,7 @@ class MainWindow(QMainWindow):
     def _on_jvm_edited(self, *_args) -> None:
         if self._loading:
             return
-        if self.per_instance_check.isChecked():
-            self.per_instance_check.setToolTip("当前实例已有独立设置")
         self.status.showMessage("设置已修改，点“保存配置”生效或直接启动（会自动保存）", 4000)
-
-    def _on_per_instance_toggled(self, checked: bool) -> None:
-        if checked:
-            self.status.showMessage("内存/JVM 参数将只对当前实例生效", 4000)
-        else:
-            self.status.showMessage("内存/JVM 参数改回全局生效（当前实例的独立设置会被清除）", 4000)
 
     def _refresh_instances(self, reload_only: bool = False) -> None:
         cfg = self.cfg if (reload_only or self._loading) else self._collect_from_ui()

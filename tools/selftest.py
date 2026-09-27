@@ -8,9 +8,10 @@ DPAPI 凭据往返、密钥扫描。任何一项失败都会打印 [FAIL] 并以
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -81,10 +82,12 @@ def test_config() -> None:
                    "instances": {"b": {"memory_mb": 8192, "width": 1280}}},
         "tools": {"obs": {"close_on_exit": "ask", "path": "x.exe"}},
     })
-    check("实例覆盖生效", cfg.launch.effective("b").memory_mb == 8192)
-    check("实例覆盖不影响别的实例", cfg.launch.effective("a").memory_mb == 2048)
-    check("实例覆盖的其它字段", cfg.launch.effective("b").width == 1280)
     check("工具配置解析", cfg.tools["obs"].close_on_exit == "ask")
+    check("全局设置被正确读取", cfg.launch.memory_mb == 2048)
+    # 「按实例覆盖」已按用户要求删除：旧配置里的 instances 必须被忽略而不是报错，
+    # 而且不静默丢数据（load_config 会把原文件备份成 config.json.bak-*）
+    check("旧的按实例覆盖被忽略（不再改动全局值）", cfg.launch.memory_mb == 2048)
+    check("旧配置不因为多余字段而构造失败", cfg.launch.width == 0)
 
 
 def test_instances() -> None:
@@ -104,7 +107,7 @@ def test_instances() -> None:
               "、".join(str(p) for p in resolved.missing[:3]))
         npath = natives_mod.prepare(version)
         check(f"{name} natives 目录可用", npath.is_dir())
-        launch_cfg = cfg.launch.effective(name)
+        launch_cfg = cfg.launch
         command = build_command(version, FakeSession(), launch_cfg)
         joined = " ".join(command.args)
         check(f"{name} 命令行含主类", version.main_class in command.args)
@@ -256,13 +259,13 @@ def test_jvm_preset_semantics() -> None:
     # build_command 会校验 java 可执行文件存在，所以得给它一个真路径
     import shutil
 
-    java_path = cfg.launch.effective(instance).java_path or shutil.which("java") or ""
+    java_path = cfg.launch.java_path or shutil.which("java") or ""
     if not Path(java_path).is_file():
         print(f"[skip] 本机没有可用的 java（{java_path!r}），跳过命令行组装检查")
         return
 
     for preset in ("custom", "aikar", "vanilla"):
-        launch = cfg.launch.effective(instance)
+        launch = cfg.launch
         launch.jvm_preset = preset
         launch.jvm_args_extra = marker
         try:
@@ -290,6 +293,51 @@ def test_wording() -> None:
           tail[-1] if tail else "")
 
 
+def test_legacy_override_backup() -> None:
+    """旧配置里的「按实例覆盖」要备份后忽略，不能静默丢数据、也不能把构造搞崩。
+
+    这个功能已按用户要求删除（所有实例共用一套设置）。备份是必须的：
+    用户可能在那里调过某个实例的 JVM 参数，直接丢掉就找不回来了。
+    """
+    import json
+    import tempfile
+
+    import mcsl.config as config_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old_dir = os.environ.get("MCSL_DATA_DIR")
+        os.environ["MCSL_DATA_DIR"] = tmp
+        try:
+            legacy = {"launch": {"instance": "x", "memory_mb": 4096,
+                                 "instances": {"x": {"memory_mb": 8192}}}}
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(json.dumps(legacy), encoding="utf-8")
+            config_mod._legacy_overrides_backed_up = False
+            cfg = config_mod.load_config()
+            backups = list(Path(tmp).glob("config.json.bak-*"))
+            check("旧配置被备份成 config.json.bak-*", len(backups) == 1,
+                  str([b.name for b in backups]))
+            if backups:
+                saved = json.loads(backups[0].read_text(encoding="utf-8"))
+                check("备份里保留了原来的 instances 内容",
+                      saved["launch"]["instances"]["x"]["memory_mb"] == 8192)
+            check("载入时忽略覆盖（用全局值 4096 而不是 8192）",
+                  cfg.launch.memory_mb == 4096, str(cfg.launch.memory_mb))
+            check("配置对象里不再有 instances 字段",
+                  "instances" not in asdict(cfg.launch))
+            # 模拟"进程重启"：清掉进程内标志再来一次，应该复用同一个备份
+            config_mod._legacy_overrides_backed_up = False
+            config_mod.load_config()
+            check("重复载入（含换进程）不会反复生成备份",
+                  len(list(Path(tmp).glob("config.json.bak-*"))) == 1,
+                  str([b.name for b in Path(tmp).glob("config.json.bak-*")]))
+        finally:
+            if old_dir is None:
+                os.environ.pop("MCSL_DATA_DIR", None)
+            else:
+                os.environ["MCSL_DATA_DIR"] = old_dir
+
+
 def main() -> int:
     print("=" * 60)
     test_rules()
@@ -303,6 +351,8 @@ def main() -> int:
     test_java()
     print("-" * 60)
     test_jvm_preset_semantics()
+    print("-" * 60)
+    test_legacy_override_backup()
     print("-" * 60)
     test_wording()
     print("-" * 60)

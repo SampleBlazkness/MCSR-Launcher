@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 
 # 离屏 + 独立数据目录（不碰真实配置）
@@ -75,13 +76,13 @@ def main() -> int:
     check("路径框载入了 NinjabrainBot",
           window.picker_njb.value() == cfg.tools["ninjabrainbot"].path)
     check("路径框载入了 OBS", window.picker_obs.value() == cfg.tools["obs"].path)
-    check("内存框载入了配置", window.memory_spin.value() == cfg.launch.effective().memory_mb)
+    check("内存框载入了配置", window.memory_spin.value() == cfg.launch.memory_mb)
     check("实例下拉非空", window.instance_combo.count() > 0,
           f"{window.instance_combo.count()} 项")
     check("实例下拉包含配置里的实例",
           cfg.launch.instance in [window.instance_combo.itemText(i)
                                   for i in range(window.instance_combo.count())])
-    check("JVM 预设选中 custom", window.preset_combo.currentData() == cfg.launch.effective().jvm_preset)
+    check("JVM 预设选中 custom", window.preset_combo.currentData() == cfg.launch.jvm_preset)
     check("追加参数框显示了调参", "-XX:+UseG1GC" in window.extra_args_edit.text())
     check("工具关闭策略载入（OBS=询问）",
           next(w["close"].currentData() for n, w in window.tool_widgets.items() if n == "obs") == "ask")
@@ -109,30 +110,26 @@ def main() -> int:
     window.picker_njb.set_value("D:/tmp/NJB.jar")
     window.tool_widgets["obs"]["delay"].setValue(1500)
     collected = window._collect_from_ui()
-    check("内存写回", collected.launch.effective().memory_mb == 6144)
+    check("内存写回", collected.launch.memory_mb == 6144)
     check("追加参数写回",
-          collected.launch.effective().jvm_args_extra == "-XX:+UseG1GC -Dfile.encoding=GB18030")
+          collected.launch.jvm_args_extra == "-XX:+UseG1GC -Dfile.encoding=GB18030")
     check("工具路径写回", collected.tools["ninjabrainbot"].path == "D:/tmp/NJB.jar")
     check("工具延迟写回", collected.tools["obs"].start_delay_ms == 1500)
 
-    print("\n=== 按实例覆盖 ===")
+    print("\n=== 设置是全局的（「按实例覆盖」功能已删除）===")
+    check("界面上没有「只对当前实例生效」这个勾选框", not hasattr(window, "per_instance_check"))
     window.memory_spin.setValue(2048)
-    window.per_instance_check.setChecked(True)
     collected = window._collect_from_ui()
-    instance = collected.launch.instance
-    check("覆盖写进了 instances 表", instance in collected.launch.instances)
-    check("覆盖值生效", collected.launch.effective(instance).memory_mb == 2048)
-    check("全局值没被改动", collected.launch.memory_mb == 6144)
-    window.per_instance_check.setChecked(False)
-    collected = window._collect_from_ui()
-    check("取消勾选后覆盖被清除", instance not in collected.launch.instances)
+    check("改内存直接写进全局设置", collected.launch.memory_mb == 2048)
+    check("配置结构里不再有 instances 表（旧字段也不写回）",
+          "instances" not in asdict(collected.launch))
 
     print("\n=== 保存与读取往返 ===")
     path = save_config(collected)
     reloaded = load_config()
     check("配置能存到数据目录（不在仓库里）",
           str(path).startswith(os.environ["MCSL_DATA_DIR"]), str(path))
-    check("重读一致", reloaded.launch.effective().memory_mb == 2048
+    check("重读一致", reloaded.launch.memory_mb == 2048
           and reloaded.tools["ninjabrainbot"].path == "D:/tmp/NJB.jar")
 
     print("\n=== 切换实例后 Java 提示要跟着更新 ===")
