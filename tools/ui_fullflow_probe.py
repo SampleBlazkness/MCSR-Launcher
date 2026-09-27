@@ -11,8 +11,12 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-
-faulthandler.enable()
+# 段错误没有 Python 回溯，faulthandler 能在崩溃时打出 C 层的调用栈。
+# 必须指定文件：pythonw 下没有有效 stderr 时 faulthandler.enable() 会直接抛异常，
+# 表现成"莫名其妙 exit 1"（真程序里用的是 logs/faulthandler.log）。
+_fault_file = open(Path(tempfile.gettempdir()) / "mcsl-fullflow-faults.txt", "a",
+                   encoding="utf-8", errors="replace")
+faulthandler.enable(file=_fault_file, all_threads=True)
 os.environ["MCSL_DATA_DIR"] = str(Path(tempfile.gettempdir()) / "mcsl-fullflow")
 os.environ["MCSL_ELEVATION_DECLINED"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -31,6 +35,20 @@ from mcsl.logging_setup import setup                               # noqa: E402
 from mcsl.ui.main_window import MainWindow                         # noqa: E402
 
 UUID = "f86a3ab6163c420197e5dfc196f6fd91"
+LOG_FILE = Path(tempfile.gettempdir()) / "mcsl-fullflow-probe.txt"
+
+
+def note(text: str) -> None:
+    """探针自己的输出：写文件。
+
+    不用 print —— pythonw 下没有 stdout/stderr，进度和异常都会无声丢掉，
+    之前正是因此把探针自身的错误看成了"程序莫名其妙退出"。
+    """
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except OSError:
+        pass
 
 
 def fake_patches() -> None:
@@ -56,39 +74,47 @@ def fake_patches() -> None:
 def main() -> int:
     fake_patches()
     setup()
+    LOG_FILE.unlink(missing_ok=True)
     app = QApplication(sys.argv[:1])
     window = MainWindow(load_config())
     window.show()
     state: dict[str, object] = {}
 
+    def note_safe(text: str) -> None:
+        note(text)
+
     def click_login() -> None:
-        print(">>> 点击登录（走真实线程，链路上全是假数据）", flush=True)
+        note(">>> 点击登录（走真实线程，链路上全是假数据）")
         window.login_button.click()
 
     def report() -> None:
-        acc = window.accounts.selected
-        print(">>> 账号栏:", window.account_label.text(), flush=True)
-        print(">>> 已保存账号:", acc.name if acc else None,
-              "| 有 refresh_token:", bool(acc.refresh_token) if acc else None, flush=True)
-        print(">>> 日志末行:", window.log_view.text().strip().splitlines()[-1:], flush=True)
-        print(">>> [ok] 全程存活", flush=True)
-        state["checked"] = True
+        # 这里出异常必须看得见：pythonw 下没有 stderr，异常会被无声吞掉
+        try:
+            acc = window.accounts.selected
+            note(f">>> 账号栏: {window.account_label.text()}")
+            note(f">>> 已保存账号: {acc.name if acc else None}"
+                 f" | 有 refresh_token: {bool(acc.refresh_token) if acc else None}")
+            note(f">>> 日志末行: {window.log_view.text().strip().splitlines()[-1:]}")
+            note(">>> [ok] 全程存活")
+            state["checked"] = True
+        except BaseException:
+            note(">>> [FAIL] 检查点抛异常:\n" + traceback.format_exc())
 
     def finish() -> None:
-        print(">>> 结束探针", flush=True)
+        note(">>> 结束探针")
         app.quit()
 
     QTimer.singleShot(500, click_login)
     QTimer.singleShot(6000, report)
     QTimer.singleShot(9000, finish)
     app.exec()
-    print(">>> 是否走到检查点:", bool(state.get("checked")), flush=True)
+    note_safe(f">>> 是否走到检查点: {bool(state.get('checked'))}")
     return 0 if state.get("checked") else 1
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except BaseException:
-        traceback.print_exc()
+    except Exception:
+        note(">>> [FAIL] 未捕获异常:\n" + traceback.format_exc())
         raise

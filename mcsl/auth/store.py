@@ -14,6 +14,7 @@ import ctypes
 import json
 import logging
 import os
+import threading
 import time
 from ctypes import wintypes
 from dataclasses import asdict, dataclass, field
@@ -144,10 +145,14 @@ class AccountStore:
 
     加密可用时是整个 JSON blob 的 DPAPI 密文；不可用时（非 Windows）
     退化为 base64 明文并在日志里明确告警 —— 数据目录仍在仓库之外。
+
+    线程安全：登录线程会 upsert，界面的账号栏刷新会 load，两者可能并发；
+    Windows 上并发 replace 同一个临时文件会直接抛 OSError。统一加锁串行化。
     """
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or accounts_file()
+        self._lock = threading.RLock()
 
     # -------- 低层 --------
     def _read_raw(self) -> StoreData:
@@ -192,37 +197,42 @@ class AccountStore:
 
     # -------- 高层 --------
     def load(self) -> StoreData:
-        return self._read_raw()
+        with self._lock:
+            return self._read_raw()
 
     def save(self, data: StoreData) -> None:
-        self._write_raw(data)
+        with self._lock:
+            self._write_raw(data)
 
     def upsert(self, account: Account, *, select: bool = True) -> StoreData:
-        data = self._read_raw()
-        for i, existing in enumerate(data.accounts):
-            if existing.uuid and existing.uuid == account.uuid:
-                data.accounts[i] = account
-                break
-        else:
-            data.accounts.append(account)
-        if select or not data.selected:
-            data.selected = account.uuid
-        self._write_raw(data)
-        return data
+        with self._lock:
+            data = self._read_raw()
+            for i, existing in enumerate(data.accounts):
+                if existing.uuid and existing.uuid == account.uuid:
+                    data.accounts[i] = account
+                    break
+            else:
+                data.accounts.append(account)
+            if select or not data.selected:
+                data.selected = account.uuid
+            self._write_raw(data)
+            return data
 
     def remove(self, uuid: str) -> StoreData:
-        data = self._read_raw()
-        data.accounts = [a for a in data.accounts if a.uuid != uuid]
-        if data.selected == uuid:
-            data.selected = data.accounts[0].uuid if data.accounts else ""
-        self._write_raw(data)
-        return data
+        with self._lock:
+            data = self._read_raw()
+            data.accounts = [a for a in data.accounts if a.uuid != uuid]
+            if data.selected == uuid:
+                data.selected = data.accounts[0].uuid if data.accounts else ""
+            self._write_raw(data)
+            return data
 
     def update_session(self, uuid: str, session: dict[str, Any] | None) -> None:
-        data = self._read_raw()
-        for acc in data.accounts:
-            if acc.uuid == uuid:
-                acc.session = session
-                acc.last_used = time.time()
-                break
-        self._write_raw(data)
+        with self._lock:
+            data = self._read_raw()
+            for acc in data.accounts:
+                if acc.uuid == uuid:
+                    acc.session = session
+                    acc.last_used = time.time()
+                    break
+            self._write_raw(data)

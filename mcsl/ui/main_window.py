@@ -23,7 +23,8 @@ from ..tools import winproc
 from ..tools.manager import TOOL_LABELS
 from .dialogs import LoginDialog
 from .widgets import LogView, PathPicker
-from .workers import GameExitWorker, LaunchWorker, TokenWorker, track_object, track_thread
+from .workers import (GameExitWorker, LaunchWorker, TokenWorker, UiBridge, track_object,
+                      track_thread)
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +45,15 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.resize(980, 720)
+        # 长生命周期的信号桥：LaunchService 的后台线程会一直用它转发游戏输出，
+        # 而 worker 对象早就被销毁了（用 worker 的 signal 会得到
+        # "Signal source has been deleted"，进而打死转发线程）。
+        self.bridge = UiBridge()
         # 加载守卫：_load_into_ui 会给控件赋值，控件信号不能在这期间回写配置
         self._loading = True
         self._build_ui()
+        self.bridge.log_line.connect(self._append_log)
+        self.bridge.status.connect(self._on_launch_status)
         self._load_into_ui()
         self._refresh_instances(reload_only=True)
         self._loading = False
@@ -623,9 +630,9 @@ class MainWindow(QMainWindow):
 
         self.accounts.cfg = self.cfg.auth
         self._set_busy(True, "正在准备启动…")
-        worker = LaunchWorker(self.cfg, self.accounts)
-        worker.status.connect(self._on_launch_status)
-        worker.log_line.connect(self._append_log)
+        worker = LaunchWorker(self.cfg, self.accounts,
+                              on_log=self.bridge.log_line.emit,
+                              on_status=self.bridge.status.emit)
         worker.failed.connect(self._on_launch_failed)
         worker.service_ready.connect(self._on_service_ready)
         worker.game_exited.connect(self._on_game_exited)
@@ -669,9 +676,9 @@ class MainWindow(QMainWindow):
             self._set_busy(False)
             return
         self._set_busy(True, "正在清理辅助工具…")
-        worker = GameExitWorker(service, ask_handler=lambda name: answers.get(name, True))
-        worker.log_line.connect(self._append_log)
-        worker.status.connect(self._on_launch_status)
+        worker = GameExitWorker(service, ask_handler=lambda name: answers.get(name, True),
+                               on_log=self.bridge.log_line.emit,
+                               on_status=self.bridge.status.emit)
         worker.reports_ready.connect(self._on_reports_ready)
         worker.finished.connect(self._on_launch_finished)
         self._start_worker(worker)

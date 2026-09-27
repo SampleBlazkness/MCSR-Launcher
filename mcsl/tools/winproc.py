@@ -418,11 +418,17 @@ def relaunch_self_elevated(argv: list[str]) -> tuple[int, str]:
 
 
 def kill_elevated(pids: list[int]) -> tuple[bool, str]:
-    """请求提权的 taskkill 强杀一组 pid（用于自身没提权但目标提权的情况）。"""
+    """请求提权的 taskkill 强杀一组 pid（用于自身没提权但目标提权的情况）。
+
+    参数必须拆开传（"/PID", "1234"）：拼成 "/PID 1234" 一个参数时
+    会被引号包成一整块，taskkill 报语法错误而静默失败。
+    """
     if not pids:
         return True, ""
-    args = [f"/PID {pid}" for pid in pids]
-    pid, err = shell_execute("taskkill.exe", ["/F"] + args, elevate=True, wait=True)
+    args = ["/F"]
+    for pid in pids:
+        args += ["/PID", str(pid)]
+    pid, err = shell_execute("taskkill.exe", args, elevate=True, wait=True)
     if pid == 0:
         return False, err
     return True, ""

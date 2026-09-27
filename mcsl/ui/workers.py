@@ -47,8 +47,27 @@ def _drop_object(obj) -> None:
             return
 
 
+class UiBridge(QObject):
+    """主窗口持有的长生命周期信号桥。
+
+    为什么必须有它：LaunchService 的回调（游戏输出转发、状态更新）会被
+    **后台线程**调用，而 worker 对象在 run() 返回后就被 Qt 销毁了。把回调直接
+    绑在 worker 的 signal 上，会得到 "RuntimeError: Signal source has been
+    deleted" —— 这个异常会打死转发线程，进而把游戏日志管道写满、把游戏卡死。
+    桥接对象由主窗口持有、活到程序结束，且它的绑定方法属于主线程 QObject，
+    所以从任何线程 emit 都会自动排到主线程执行。
+    """
+
+    log_line = Signal(str)
+    status = Signal(str)
+
+
 class LaunchWorker(QObject):
-    """准备 + 启动游戏（在后台线程执行，避免界面卡死）。"""
+    """准备 + 启动游戏（在后台线程执行，避免界面卡死）。
+
+    输出转发与状态更新走 UiBridge（长生命周期），不用本对象的 signal ——
+    本对象在 run() 返回后就会被销毁，而游戏输出要转发到游戏结束。
+    """
 
     status = Signal(str)
     log_line = Signal(str)
@@ -57,10 +76,13 @@ class LaunchWorker(QObject):
     game_exited = Signal(int, float)
     finished = Signal()
 
-    def __init__(self, cfg: AppConfig, accounts: AccountManager) -> None:
+    def __init__(self, cfg: AppConfig, accounts: AccountManager, *,
+                 on_log=None, on_status=None) -> None:
         super().__init__()
         self.cfg = cfg
         self.accounts = accounts
+        self.on_log = on_log or self.log_line.emit
+        self.on_status = on_status or self.status.emit
         self.service: LaunchService | None = None
         self.force_refresh = False
 
@@ -68,19 +90,19 @@ class LaunchWorker(QObject):
     def run(self) -> None:
         try:
             service = LaunchService(self.cfg, self.accounts,
-                                    on_log=self.log_line.emit,
-                                    on_status=self.status.emit)
+                                    on_log=self.on_log,
+                                    on_status=self.on_status)
             self.service = service
             version, command = service.prepare(force_refresh=self.force_refresh)
-            self.log_line.emit(f"实例 {version.id}｜Java 要求 {version.java_major}｜"
-                               f"classpath {len(command.classpath)} 项")
+            self.on_log(f"实例 {version.id}｜Java 要求 {version.java_major}｜"
+                        f"classpath {len(command.classpath)} 项")
             if command.missing:
-                self.log_line.emit(f"⚠ 有 {len(command.missing)} 个库文件缺失，"
-                                   "游戏可能启动失败（详情见日志文件）")
-            self.status.emit("正在启动辅助工具…")
+                self.on_log(f"⚠ 有 {len(command.missing)} 个库文件缺失，"
+                            "游戏可能启动失败（详情见日志文件）")
+            self.on_status("正在启动辅助工具…")
             service.start_tools()
             service.start_game(command, on_game_exit=self._on_game_exit)
-            self.status.emit("Minecraft 运行中")
+            self.on_status("Minecraft 运行中")
             self.service_ready.emit(service)
         except (AuthError, FileNotFoundError, ValueError, RuntimeError, OSError) as exc:
             log.exception("启动失败")
@@ -103,22 +125,25 @@ class GameExitWorker(QObject):
     reports_ready = Signal(object)     # list[CloseReport]
     finished = Signal()
 
-    def __init__(self, service: LaunchService, ask_handler) -> None:
+    def __init__(self, service: LaunchService, ask_handler, *,
+                 on_log=None, on_status=None) -> None:
         super().__init__()
         self.service = service
         self.ask_handler = ask_handler    # 在主线程弹窗的回调（阻塞等待结果）
+        self.on_log = on_log or self.log_line.emit
+        self.on_status = on_status or self.status.emit
 
     @Slot()
     def run(self) -> None:
         try:
-            self.status.emit("正在清理辅助工具…")
+            self.on_status("正在清理辅助工具…")
             reports = self.service.stop_tools(ask=self.ask_handler)
             self.reports_ready.emit(reports)
         except Exception as exc:  # noqa: BLE001
             log.exception("清理失败")
-            self.log_line.emit(f"清理过程出错：{exc}")
+            self.on_log(f"清理过程出错：{exc}")
         finally:
-            self.status.emit("就绪")
+            self.on_status("就绪")
             self.finished.emit()
 
 
