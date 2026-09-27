@@ -78,6 +78,9 @@ class LogView(QWidget):
         self.view = QPlainTextEdit()
         self.view.setReadOnly(True)
         self.view.setMaximumBlockCount(5000)
+        # 日志窗格可压缩：它的默认最小高度会把整个窗口撑得比 768 高的笔记本屏幕还高，
+        # 那样窗口就没法完整显示（日志本来就带滚动条，矮一点没影响）。
+        self.view.setMinimumHeight(80)
         font = QFont("Consolas")
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(9)

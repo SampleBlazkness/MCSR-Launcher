@@ -227,6 +227,22 @@ def test_java() -> None:
     check("空列表返回 None", pick_best([], 8) is None)
 
 
+def test_wording() -> None:
+    """面向用户的文案里不许出现只对某台机器/某个人成立的措辞。
+
+    这条是用户明确要求过的（"不要针对我定制"），所以进回归清单：
+    界面文本必须对任何用户、任何环境都成立。
+    """
+    import subprocess
+
+    script = Path(__file__).resolve().parent / "check_wording.py"
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    tail = (proc.stdout or "").strip().splitlines()
+    check("文案检查通过（tools/check_wording.py）", proc.returncode == 0,
+          tail[-1] if tail else "")
+
+
 def main() -> int:
     print("=" * 60)
     test_rules()
@@ -238,6 +254,8 @@ def main() -> int:
     test_instances()
     print("-" * 60)
     test_java()
+    print("-" * 60)
+    test_wording()
     print("-" * 60)
     test_startup_path()
     print("-" * 60)

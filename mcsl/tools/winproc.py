@@ -114,6 +114,35 @@ def get_app_user_model_id() -> str:
         return ""
 
 
+def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """取窗口在屏幕上的真实外框 (left, top, right, bottom)。
+
+    比 Qt 的 frameGeometry() 可靠：后者在 Windows 上不含标题栏（实测和
+    GetWindowRect 差一个 caption 的高度，31px），拿它来居中会偏低。
+    """
+    if not is_windows() or not hwnd:
+        return None
+
+    class RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    rect = RECT()
+    if not ctypes.windll.user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def move_window(hwnd: int, x: int, y: int) -> bool:
+    """把窗口外框左上角移动到 (x, y)（不改大小、不改层序、不抢焦点）。"""
+    if not is_windows() or not hwnd:
+        return False
+    SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x0001, 0x0004, 0x0010
+    return bool(ctypes.windll.user32.SetWindowPos(
+        ctypes.c_void_p(hwnd), None, x, y, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE))
+
+
 def is_process_elevated(pid: int) -> bool | None:
     """目标进程是否提权运行。None = 查不到（权限不足/进程已退出）。"""
     if not is_windows():

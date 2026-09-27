@@ -180,10 +180,10 @@ class JavaPickerDialog(QDialog):
         layout.addWidget(need)
 
         caveat = QLabel(
-            "这只是游戏发布时写下的声明。装了 Fabric、模组，或换了加载器 / JVM 参数之后，"
-            "实际能用的版本可能和它不同（例如 1.16.1 声明 Java 8，装速通模组后用 Java 25 跑；"
-            "新版 JVM 参数在 Java 8 上会直接拒绝启动）。所以“是否符合声明”只作参考，"
-            "能正常启动的版本就是对的。")
+            "这只是游戏发布时写下的声明，仅供参考：装了模组、换了加载器或改了 JVM 参数之后，"
+            "实际能用的版本常和它不同 —— 有的实例声明 Java 8，却在模组或新版 JVM 参数下必须用"
+            " Java 17 以上（反过来，新版 JVM 参数在旧 Java 上会直接拒绝启动）。"
+            "所以“是否符合声明”只作参考，能正常启动的版本就是对的。")
         caveat.setWordWrap(True)
         caveat.setStyleSheet("color:#8a8a8a;")
         layout.addWidget(caveat)

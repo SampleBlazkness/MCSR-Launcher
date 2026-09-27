@@ -21,6 +21,7 @@ os.environ["MCSL_NO_ELEVATE"] = "1"   # 测试用：跳过提权自重启
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import Qt                                     # noqa: E402
+from PySide6.QtGui import QGuiApplication                         # noqa: E402
 from PySide6.QtWidgets import QApplication                       # noqa: E402
 
 from mcsl.config import load_config, save_config                 # noqa: E402
@@ -41,6 +42,32 @@ def main() -> int:
     app = QApplication(sys.argv[:1])          # noqa: F841 - 必须存在
     cfg = load_config()
     window = MainWindow(cfg)
+    window.show()                             # 触发 showEvent（居中在这里做）
+    app.processEvents()
+
+    print("=== 窗口位置 ===")
+    area = (window.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+    geo = window.frameGeometry()
+    check("窗口左上角在可用区域内（标题栏不会跑到屏幕外）",
+          area.contains(geo.topLeft()),
+          f"窗口 {geo.width()}x{geo.height()} @({geo.x()},{geo.y()}) 屏幕 {area.width()}x{area.height()}")
+
+    # 窗口放得下就居中；放不下（离屏平台的屏幕只有 800x800）就该贴边而不是跑到屏幕外，
+    # 所以两种情况分别断言 —— 只按"居中"断言在离屏下必然失败。
+    if geo.width() <= area.width():
+        dx = abs(geo.center().x() - area.center().x())
+        dx_desc = f"水平居中偏差 {dx}px"
+    else:
+        dx = abs(geo.x() - area.x())
+        dx_desc = f"窗口比屏幕宽，应贴左边：实际 x={geo.x()}，屏幕 x={area.x()}"
+    if geo.height() <= area.height():
+        dy = abs(geo.center().y() - area.center().y())
+        dy_desc = f"垂直居中偏差 {dy}px"
+    else:
+        dy = abs(geo.y() - area.y())
+        dy_desc = f"窗口比屏幕高，应贴顶部：实际 y={geo.y()}，屏幕 y={area.y()}"
+    check("窗口按可用区域居中或贴边（都不会跑到屏幕外）", dx <= 8 and dy <= 8,
+          f"{dx_desc}；{dy_desc}")
 
     print("=== 控件是否载入了配置 ===")
     check("路径框载入了 .minecraft", window.picker_mc.value() == cfg.launch.minecraft_dir,
@@ -107,6 +134,20 @@ def main() -> int:
           str(path).startswith(os.environ["MCSL_DATA_DIR"]), str(path))
     check("重读一致", reloaded.launch.effective().memory_mb == 2048
           and reloaded.tools["ninjabrainbot"].path == "D:/tmp/NJB.jar")
+
+    print("\n=== 切换实例后 Java 提示要跟着更新 ===")
+    hint_before = window.java_hint.text()
+    names = [window.instance_combo.itemText(i) for i in range(window.instance_combo.count())]
+    target = next((n for n in names if n != window.instance_combo.currentText()), None)
+    if target is None:
+        check("至少有两个实例可供切换（否则这条测不了）", False, f"只有 {names}")
+    else:
+        window.instance_combo.setCurrentIndex(window.instance_combo.findText(target))
+        app.processEvents()
+        hint_after = window.java_hint.text()
+        check(f"切到 {target} 后提示立刻更新（不需要点别的按钮）",
+              hint_after != hint_before and target in hint_after,
+              f"切换前 {hint_before[:40]} → 切换后 {hint_after[:60]}")
 
     print("\n=== 账号栏 ===")
     window._refresh_account_bar()

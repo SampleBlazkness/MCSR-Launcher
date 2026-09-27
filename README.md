@@ -3,7 +3,7 @@
 给 Minecraft 速通（RSG）用的一键启动器：**自动获取 Minecraft access_token**，
 一条命令拉起 NinjabrainBot / Jingle / OBS 和游戏，退出后自动清理。
 
-替代原来那个「每次都要去 HMCL 导出脚本、手动粘 access_token」的流程。
+自己完成微软认证、管理 access_token，不需要外部工具导出启动脚本或手动粘贴令牌。
 
 ---
 
@@ -11,7 +11,7 @@
 
 | 旧流程的痛点 | 现在的做法 |
 | --- | --- |
-| 每次启动都要用 HMCL 导出脚本拿 access_token，手粘进 ps1 | 启动器自己走微软 OAuth（**设备码**：显示一个 8 位码，去 microsoft.com/link 输入）→ Xbox Live → XSTS → Minecraft Services，**登录一次，之后自动续期** |
+| 每次启动都要手工获取 access_token 再粘进启动脚本 | 启动器自己走微软 OAuth（**设备码**：显示一个 8 位码，去 microsoft.com/link 输入）→ Xbox Live → XSTS → Minecraft Services，**登录一次，之后自动续期** |
 | `access_token` 明文写在脚本里、还躺在桌面上 | refresh token 用 Windows **DPAPI 加密**存在 `%LOCALAPPDATA%\MCSR-Launcher\accounts.dat`，仓库与 OneDrive 里都没有 |
 | Jingle 关了不掉（提权进程 + UIPI），错误被 `-ErrorAction SilentlyContinue` 吞掉 | 工具由启动器自己启动、自己持有 PID；启动器默认以管理员身份运行，关闭时逐级降级（WM_CLOSE → 强杀 → 提权 taskkill）并**记录每一步的成功/失败原因** |
 | OBS 关不掉（原因未定位） | 退出后弹窗询问；关闭过程写诊断日志，能直接看出卡在哪一步 |
@@ -70,7 +70,7 @@ python -m venv .venv
 2. 点右上角「登录微软账号」，浏览器打开 `https://www.microsoft.com/link` 输入界面上的代码。
    登录成功后 refresh token 会加密落盘，**以后不用再登**。
 3. 「路径与实例」页选好 `.minecraft` 目录、四个工具路径、Java 路径，选实例。
-4. 「启动设置」页调内存 / JVM 参数（默认已经是你原来那套调参）。
+4. 「启动设置」页调内存 / JVM 参数（默认值按常见速通配置预调过，可随意改）。
 5. 点「启动游戏」。
 
 默认会**以管理员身份重新启动自己**（不再询问）——必须提权才能正常关闭 Jingle
@@ -80,9 +80,9 @@ python -m venv .venv
 
 ## Java：为什么不再"自动挑一个"
 
-旧版本点「自动检测本机 Java」是把找到的候选按**目录名**排序取最后一个 —— 字符串比较下
-`zulu-8` 排在 `zulu-25` 之后，所以永远挑中 Java 8。1.16.1 用 Java 8 恰好是对的，
-可一旦切到需要 Java 25 的 26.3 实例就必错，而且错得没有提示。
+旧版本点「自动检测本机 Java」是把找到的候选按**目录名**排序取最后一个 —— 目录名是字符串，
+`jdk-8` 会排在 `jdk-25` 之后，于是永远挑中 Java 8：对老版本游戏恰好是对的，
+可一旦切到需要新 Java 的实例就必错，而且错得没有提示。
 
 现在：
 
@@ -95,16 +95,15 @@ python -m venv .venv
 - 「选择 Java…（列出本机全部）」打开列表：每行显示 版本 / 是否匹配 / 厂商 / 架构 / 路径 / 来源，
   按「匹配优先、版本从高到低」排序，默认预选最合适的那个；还有「只显示与当前实例匹配的版本」
   筛选、「手动选择 java.exe…」和「重新检测」。列表下方会提示
-  「看着像 Java 但里面没有 `bin\java.exe`」的坏目录（实测遇到过一个装到一半的 `zulu-21`）。
+  「看着像 Java 但里面没有 `bin\java.exe`」的坏目录（例如某些装到一半、只剩空目录的残留）。
 - 点「启动游戏」时会核对版本：不匹配弹一次确认（可以「仍然启动」，也可以直接「去换 Java…」），
   同一次运行里同一个实例只问一次。
 
-实例需要哪个版本，直接读版本 JSON 的 `javaVersion.majorVersion`（本机：1.16.1 → 8，
-26.3-Fabric → 25）。**但那个数字只是游戏发布时写下的声明**：装了 Fabric、模组，或换了加载器 /
-JVM 参数之后，实际能用的版本经常和它不一样。这台机器就是活例子 —— 1.16.1 声明 Java 8，
-但实际用 Java 25 跑（模组本身全是 Java 8 字节码，真正过不去的是 MCSR 那套为 Java 25/24 调参数：
-`-XX:NonNMethodCodeHeapSize`、`--sun-misc-unsafe-memory-access=allow` 这些选项在 Java 8 上直接
-让 JVM 拒绝启动）。所以界面上的判断分两档：
+实例需要哪个版本，直接读版本 JSON 的 `javaVersion.majorVersion`。**但那个数字只是游戏发布时
+写下的声明**：装了模组、换了加载器或改了 JVM 参数之后，实际能用的版本经常和它不一样 ——
+常见的情况是老版本游戏（声明 Java 8）配上新版 JVM 参数后必须用 Java 17 以上，
+因为 `-XX:NonNMethodCodeHeapSize`、`--sun-misc-unsafe-memory-access=allow` 这类选项
+在旧 Java 上会让 JVM 直接拒绝启动。所以界面上的判断分两档：
 
 | 情况 | 表现 |
 | --- | --- |
@@ -206,7 +205,7 @@ tools/
 ## 已知限制 / 下一步
 
 - 「原生模式」已实现，但**不会自动下载缺失的库**：库文件缺失时只在日志里警告
-  （你的两个实例都由 HMCL 下载好了，不缺）。
+  （实例本身需要先以任意方式下载好，本程序只负责启动）。
 - 辅助工具里只有 `.exe` 类型支持「已在运行就复用」；jar 工具无法可靠识别已有进程。
 - 界面上的「按实例覆盖」只有内存/JVM 参数/分辨率；`config.json` 支持更多字段（java 路径、
   窗口标题等）。

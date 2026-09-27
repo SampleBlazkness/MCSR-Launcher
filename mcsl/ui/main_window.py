@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QCursor, QFont, QGuiApplication
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QPushButton, QSpinBox, QStatusBar, QTabWidget,
@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self._login_dialog: QDialog | None = None
         self._busy = False
         self._saved_snapshot: dict = {}
+        self._centered = False
         # Java 相关缓存：实例声明的 Java 版本、本机扫到的 Java 清单
         self._required_java_cache: dict[tuple[str, str], int | None] = {}
         self._java_installs: list = []
@@ -174,7 +175,7 @@ class MainWindow(QMainWindow):
         self.picker_obs = PathPicker("OBS", filter_key="exe",
                                      placeholder="obs64.exe")
         self.picker_java = PathPicker("Java", filter_key="exe",
-                                      placeholder="…\\zulu-25\\bin\\java.exe")
+                                      placeholder="例如 …\\Java\\bin\\java.exe")
         for widget in (self.picker_mc, self.picker_njb, self.picker_jingle,
                        self.picker_obs, self.picker_java):
             form.addWidget(widget)
@@ -224,7 +225,7 @@ class MainWindow(QMainWindow):
         self.memory_spin.setSingleStep(512)
         self.memory_spin.setSuffix(" MB")
         self.preset_combo = QComboBox()
-        for label, value in (("自定义（沿用我的调参）", "custom"),
+        for label, value in (("自定义（自己填参数）", "custom"),
                              ("Aikar 基线", "aikar"),
                              ("仅加固参数", "vanilla")):
             self.preset_combo.addItem(label, value)
@@ -304,13 +305,13 @@ class MainWindow(QMainWindow):
         form = QFormLayout(box)
 
         how = QLabel(
-            "登录方式固定为「设备码」，没有任何需要你选的配置：\n"
-            "1. 点上方账号栏的「重新登录」（首次启动时也会自动提示登录）\n"
-            "2. 弹出的窗口里显示一个 8 位设备码\n"
-            "3. 浏览器打开 https://www.microsoft.com/link ，输入这个码\n"
-            "4. 用你的微软账号确认登录 —— 成功后启动器自动继续，不用再管\n\n"
-            "登进去之后 access_token 自动获取、过期自动续期，不会让你再去 HMCL 导出脚本。\n"
-            "凭据用 Windows DPAPI 加密存在本机（只有当前 Windows 用户能解开），"
+            "登录方式固定为「设备码」，不需要任何配置：\n"
+            "1. 点账号栏里的「重新登录」（首次启动时也会提示登录）\n"
+            "2. 弹出的窗口里会显示一个 8 位设备码\n"
+            "3. 在浏览器打开 https://www.microsoft.com/link 并输入这个码\n"
+            "4. 用微软账号确认登录 —— 成功后启动器自动继续\n\n"
+            "登录一次之后，access_token 会自动获取、过期自动续期，不用手动喂令牌。\n"
+            "凭据用 Windows DPAPI 加密保存在本机（只有当前 Windows 用户能解开），"
             "不进仓库、不同步到云端。")
         how.setWordWrap(True)
         form.addRow("", how)
@@ -336,6 +337,45 @@ class MainWindow(QMainWindow):
         self.relogin_button.clicked.connect(self._on_relogin_clicked)
         self.logout_button.clicked.connect(self._on_logout)
         return page
+
+    # ================================================================= 窗口
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 接口
+        super().showEvent(event)
+        # 第一次显示时居中：默认 Qt 会把窗口扔在左上角，而各人分辨率/缩放不同，
+        # 窗口还可能比可用区域还高（那就有一部分落到屏幕外）。
+        # 用 0ms 单次定时器推到"窗口已经真的显示出来、装饰尺寸已知"之后再定位。
+        if not self._centered:
+            self._centered = True
+            QTimer.singleShot(0, self._center_on_screen)
+
+    def _center_on_screen(self) -> None:
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+
+        # 用 Windows 的真实窗口矩形来居中，不用 Qt 的 frameGeometry()：
+        # 后者在 Windows 上不含标题栏（实测差 31px），据此算出来的位置会让窗口偏低。
+        rect = winproc.get_window_rect(int(self.winId()))
+        if rect is not None:
+            left, top, right, bottom = rect
+            width, height = right - left, bottom - top
+        else:
+            frame = self.frameGeometry()
+            left, top, width, height = frame.x(), frame.y(), frame.width(), frame.height()
+
+        # max(0, ...) 夹住：窗口比可用区域还高时（布局最小尺寸决定）让它贴顶，
+        # 标题栏永远不会被顶到屏幕外面去，只有底部溢出。
+        target_x = area.x() + max(0, (area.width() - width) // 2)
+        target_y = area.y() + max(0, (area.height() - height) // 2)
+        if rect is not None:
+            winproc.move_window(int(self.winId()), target_x, target_y)
+        else:
+            self.move(self.x() + (target_x - left), self.y() + (target_y - top))
+
+        log.info("窗口居中：屏幕 %dx%d@(%d,%d)，窗口 %dx%d，目标 (%d,%d)",
+                 area.width(), area.height(), area.x(), area.y(),
+                 width, height, target_x, target_y)
 
     # ================================================================= 载入/保存
     def _load_into_ui(self) -> None:
@@ -376,6 +416,8 @@ class MainWindow(QMainWindow):
             widgets["delay"].setValue(int(tool.start_delay_ms))
 
         self._pin_auth_settings()
+        # 实例/配置一变，Java 那一行的提示就要跟着重算（否则切实例后还显示上一个实例的判断）
+        self._refresh_java_hint()
 
         storage = ("DPAPI 加密（绑定当前 Windows 用户，拷到别的机器解不开）"
                    if dpapi_available() else "⚠ DPAPI 不可用，凭据以明文保存")
