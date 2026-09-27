@@ -111,6 +111,26 @@ def main() -> int:
     window._refresh_account_bar()
     check("未登录时显示提示", "未登录" in window.account_label.text())
 
+    print("\n=== 登录方式与 client_id 的冲突检测（实测过的死路）===")
+    # 实测：公开 id 没有登记 localhost 回调，浏览器授权必失败（redirect_uri is not valid），
+    # 所以在点登录前就该拦下来，而不是让用户在浏览器里看到一句英文报错。
+    old_flow, old_client = window.cfg.auth.flow, window.cfg.auth.client_id
+    window.cfg.auth.flow = "auth_code"
+    window.cfg.auth.client_id = "00000000402b5328"
+    problem = window._browser_flow_problem()
+    check("公开 id + 浏览器授权 → 拦下来并解释原因",
+          bool(problem) and "redirect_uri" in problem, str(problem)[:70])
+
+    window.cfg.auth.client_id = "11112222-3333-4444-5555-666677778888"
+    check("自己注册的 Azure id + 浏览器授权 → 不拦",
+          window._browser_flow_problem() is None)
+
+    window.cfg.auth.flow = "device_code"
+    window.cfg.auth.client_id = "00000000402b5328"
+    check("公开 id + 设备码（当前默认组合）→ 不拦",
+          window._browser_flow_problem() is None)
+    window.cfg.auth.flow, window.cfg.auth.client_id = old_flow, old_client
+
     window.close()
     print("=" * 60)
     if FAILURES:

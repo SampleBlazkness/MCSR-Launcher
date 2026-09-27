@@ -315,6 +315,16 @@ class MainWindow(QMainWindow):
         form.addRow("端点预设", self.preset_auth_combo)
         form.addRow("登录方式", self.flow_combo)
 
+        endpoints_hint = QLabel(
+            "端点预设决定跟哪套微软接口说话：live 走 login.live.com（官方公开 id 就能用，"
+            "当前默认）；v2 走 microsoftonline，必须配你自己注册的 Azure 应用 id —— "
+            "公开 id 在 v2 上会被拒（AADSTS700016）。登录方式只是「怎么把授权拿回来」："
+            "设备码用任意设备输代码（公开 id 走这条）；浏览器授权要回调到本机 127.0.0.1，"
+            "公开 id 没登记这种回调，选它会失败，需要自己注册应用才可用。")
+        endpoints_hint.setWordWrap(True)
+        endpoints_hint.setStyleSheet("color:#8a8a8a;")
+        form.addRow("", endpoints_hint)
+
         layout.addWidget(box)
 
         info = QGroupBox("凭据存储")
@@ -692,6 +702,28 @@ class MainWindow(QMainWindow):
             self.accounts.select(uuid)
             self._refresh_account_bar()
 
+    def _browser_flow_problem(self) -> str | None:
+        """选了"浏览器授权"但 client_id 不可能成功时，返回一句解释；否则 None。
+
+        实测（不是推测）：浏览器授权要回调到本机 127.0.0.1 的端口，而官方那个公开
+        client_id 00000000402b5328 在微软那边没有登记 localhost 回调，authorize 端点
+        直接返回 invalid_request: redirect_uri is not valid —— 用户在浏览器里只会看到
+        一句英文报错。所以这里提前拦住，并且只拦这一个确定失败的组合。
+        """
+        auth = self.cfg.auth
+        if auth.flow != "auth_code":
+            return None
+        from ..auth.oauth import DEFAULT_CLIENT_ID
+
+        if auth.client_id.strip() != DEFAULT_CLIENT_ID:
+            return None
+        return ("当前用的是官方启动器的公开 client_id，它在微软那边没有登记 "
+                "localhost 回调，浏览器授权会失败（授权页会报 "
+                "redirect_uri is not valid）。\n\n"
+                "要么改用设备码登录，要么去 Azure 注册一个自己的应用，"
+                "把回调地址登记为 http://localhost:29111/callback 之类，"
+                "再把 client_id 换成自己的、端点预设切到 v2。")
+
     def _on_login_clicked(self, force: bool = False) -> None:
         if self._login_dialog is not None:
             return
@@ -701,6 +733,27 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
         self.accounts.cfg = self.cfg.auth
+
+        problem = self._browser_flow_problem()
+        if problem:
+            box = QMessageBox(self)
+            box.setWindowTitle("浏览器授权这条路走不通")
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(problem)
+            switch = box.addButton("改用设备码登录", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(switch)
+            box.exec()
+            if box.clickedButton() is not switch:
+                return
+            self.cfg.auth.flow = "device_code"
+            self._select_combo(self.flow_combo, "device_code")
+            self.accounts.cfg = self.cfg.auth
+            try:
+                save_config(self.cfg)
+            except OSError:
+                pass
+            self._append_log("已把登录方式切回设备码（浏览器授权需要自己注册的 client_id）")
 
         dialog = LoginDialog(self.cfg, self.accounts, self)
         dialog.succeeded.connect(self._on_login_succeeded)
