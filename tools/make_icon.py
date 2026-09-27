@@ -68,6 +68,16 @@ def main() -> int:
     image = Image.open(source).convert("RGBA")
     print(f"从 {jar.name} 提取 {entry}（{image.width}x{image.height}）→ {source}")
 
+    # Pillow 存 ICO 时内部用 thumbnail()，**只缩不放**：源图 128px 却请求 256px
+    # 会写出"目录里是 256、实际内容 128"的条目（Qt 也只读成 128），高 DPI 下模糊。
+    # 先按整数倍最近邻放大到最大尺寸 —— 草方块是像素画，最近邻放大才是游戏里的样子。
+    biggest = max(SIZES)
+    if image.width < biggest:
+        if biggest % image.width == 0:
+            image = image.resize((biggest, biggest), Image.NEAREST)
+        else:
+            image = image.resize((biggest, biggest), Image.LANCZOS)
+
     ico = ASSETS / "mcsr-launcher.ico"
     image.save(ico, format="ICO",
                sizes=[(s, s) for s in SIZES])

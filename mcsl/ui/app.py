@@ -78,6 +78,7 @@ def run(argv: list[str] | None = None) -> int:
     from .main_window import MainWindow
 
     cfg = load_config()
+    _prepare_app_identity()
     app = QApplication(argv or sys.argv[:1])
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
@@ -91,6 +92,20 @@ def run(argv: list[str] | None = None) -> int:
     window = MainWindow(cfg)
     window.show()
     return app.exec()
+
+
+def _prepare_app_identity() -> None:
+    """设置进程的 AppUserModelID —— 越早越好，必须早于任何窗口创建。
+
+    不设的话任务栏会把窗口归到 pythonw.exe 名下并显示 Python 的图标。
+    """
+    from .. import APP_NAME, APP_VERSION
+    from ..tools import winproc
+
+    ok = winproc.set_app_user_model_id(f"SampleBlazkness.{APP_NAME}.{APP_VERSION}")
+    log.log(logging.INFO if ok else logging.WARNING,
+            "AppUserModelID：%s（设置%s）",
+            winproc.get_app_user_model_id(), "成功" if ok else "失败")
 
 
 def _install_icon(app) -> None:

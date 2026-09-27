@@ -38,6 +38,18 @@ python -m venv .venv
 | `run.cmd` | 双击即可，同样不保留黑框；出错时才会停下来显示文字 |
 | `run-console.cmd` | **带控制台**，报错和日志直接可见，排查问题时用这个 |
 
+### 图标与任务栏
+
+窗口/任务栏/快捷方式的图标都来自 `assets/mcsr-launcher.ico`（7 种尺寸，含真正的 256×256），
+它由 `tools/make_icon.py` 从 Minecraft 客户端 jar 根目录的 `pack.png` 生成。
+重新生成：`python tools/make_icon.py`（需要 Pillow，仅开发期）。
+
+**任务栏之前显示的是 Python 图标**，根因不是图标文件，而是进程身份：`pythonw.exe` 起的窗口
+默认被 Windows 归到「pythonw.exe」这个应用名下，任务栏按钮就用 pythonw.exe 的图标，
+窗口自己设的图标只在标题栏和 Alt+Tab 生效。修法是启动时设一个显式的 AppUserModelID
+（`mcsl/ui/app.py` 的 `_prepare_app_identity()`，在创建任何窗口之前调用），
+并给桌面快捷方式设**同一个** ID（`tools/make_shortcut.py`），否则固定到任务栏会分成两组。
+
 启动器**始终以管理员身份启动**（不再询问）：关闭 Jingle / OBS 这类以管理员权限运行的
 工具必须要有管理员权限，否则会被 Windows 的 UIPI 拒绝。如果提权被拒（例如在 UAC 上
 点了「否」），会弹出「启动器需要管理员权限」的警告，可选择重试或仍以普通权限启动。

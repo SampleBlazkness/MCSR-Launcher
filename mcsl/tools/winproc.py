@@ -80,6 +80,40 @@ def is_self_elevated() -> bool:
         return False
 
 
+# ---------------------------------------------------- 应用身份（任务栏图标）
+def set_app_user_model_id(app_id: str) -> bool:
+    """给本进程设置显式 AppUserModelID（必须在创建任何窗口之前调用）。
+
+    不设的话，Windows 会把 pythonw.exe 起的窗口归到「pythonw.exe」这个应用名下，
+    任务栏按钮取的是 pythonw.exe 的图标（Python 那个），而窗口自己设的图标只在
+    标题栏和 Alt+Tab 里生效 —— 这就是"任务栏还是 Python 图标"的根因。
+    设了显式 ID，任务栏才把我们的窗口当作一个独立应用、改用窗口图标。
+    """
+    if not is_windows():
+        return False
+    try:
+        shell32 = ctypes.windll.shell32
+        shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+        hr = shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(app_id))
+        if hr != 0:
+            return False
+        return get_app_user_model_id().upper() == app_id.upper()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def get_app_user_model_id() -> str:
+    """读回本进程的 AppUserModelID（没显式设过时通常是 exe 路径）。"""
+    if not is_windows():
+        return ""
+    try:
+        buf = ctypes.c_wchar_p()
+        ctypes.windll.shell32.GetCurrentProcessExplicitAppUserModelID(ctypes.byref(buf))
+        return buf.value or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def is_process_elevated(pid: int) -> bool | None:
     """目标进程是否提权运行。None = 查不到（权限不足/进程已退出）。"""
     if not is_windows():
