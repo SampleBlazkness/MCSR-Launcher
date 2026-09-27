@@ -46,6 +46,8 @@ class MainWindow(QMainWindow):
         self._threads: list[QThread] = []
         self._login_dialog: QDialog | None = None
         self._busy = False
+        self._cleanup_active = False   # 游戏退出后的清理任务是否在跑
+        self._closing = False          # 正在关闭窗口（别再弹询问框）
         self._saved_snapshot: dict = {}
         self._centered = False
         # Java 相关缓存：实例声明的 Java 版本、本机扫到的 Java 清单
@@ -929,6 +931,19 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_launch_finished(self) -> None:
+        """启动会话（LaunchWorker）结束。
+
+        游戏退出后的清理可能还在跑，那时**不能**清掉忙碌状态：否则按钮提前
+        变可点，用户能在清理过程中又点一次启动，两拨工具管理会打架。
+        """
+        if self._cleanup_active:
+            log.debug("启动会话结束，但退出清理仍在进行，暂不解除忙碌状态")
+            return
+        self._set_busy(False)
+
+    @Slot()
+    def _on_cleanup_finished(self) -> None:
+        self._cleanup_active = False
         self._set_busy(False)
 
     def _on_service_ready(self, service: LaunchService) -> None:
@@ -947,6 +962,9 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
 
     def _on_game_exited(self, code: int, duration: float) -> None:
+        if self._closing:
+            log.info("游戏已退出（退出码 %s），此时正在关闭启动器，跳过退出清理", code)
+            return
         self._append_log(f"Minecraft 已退出（退出码 {code}，运行 {duration:.0f} 秒）")
         self.status.showMessage("游戏已退出", 5000)
         self.stop_button.setEnabled(False)
@@ -959,12 +977,13 @@ class MainWindow(QMainWindow):
             self._append_log("按你的选择保留全部辅助工具")
             self._set_busy(False)
             return
+        self._cleanup_active = True
         self._set_busy(True, "正在清理辅助工具…")
         worker = GameExitWorker(service, ask_handler=lambda name: answers.get(name, True),
                                on_log=self.bridge.log_line.emit,
                                on_status=self.bridge.status.emit)
         worker.reports_ready.connect(self._on_reports_ready)
-        worker.finished.connect(self._on_launch_finished)
+        worker.finished.connect(self._on_cleanup_finished)
         self._start_worker(worker)
 
     def _ask_close_tools(self, only_running: bool = True) -> dict[str, bool] | None:
@@ -1035,6 +1054,9 @@ class MainWindow(QMainWindow):
         return thread
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 接口
+        # 关窗期间不要再弹"要关闭 X 吗"：游戏退出事件可能是排队进来的，
+        # 处理它会在窗口拆除过程中弹模态框。
+        self._closing = True
         try:
             self._collect_from_ui()
             save_config(self.cfg)

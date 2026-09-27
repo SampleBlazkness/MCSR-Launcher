@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -63,10 +64,15 @@ class UiBridge(QObject):
 
 
 class LaunchWorker(QObject):
-    """准备 + 启动游戏（在后台线程执行，避免界面卡死）。
+    """准备 + 启动游戏，然后在本线程里守到游戏退出。
 
-    输出转发与状态更新走 UiBridge（长生命周期），不用本对象的 signal ——
-    本对象在 run() 返回后就会被销毁，而游戏输出要转发到游戏结束。
+    **生命周期**：这个 worker 必须活满整场游戏。它的 run() 一返回，
+    界面就会 `thread.finished → worker.deleteLater` 把它删掉；而游戏的退出回调
+    （`_on_game_exit`）还攥着它。以前 run() 启动完就 return，结果游戏退出时
+    emit 抛 `RuntimeError: Signal source has been deleted` —— 界面收不到
+    "游戏已退出"，启动按钮一直灰着、也不弹关闭辅助工具的询问。
+
+    输出转发与状态更新走 UiBridge（长生命周期），不用本对象的 signal。
     """
 
     status = Signal(str)
@@ -85,6 +91,9 @@ class LaunchWorker(QObject):
         self.on_status = on_status or self.status.emit
         self.service: LaunchService | None = None
         self.force_refresh = False
+        # 退出回调跑完了没：run() 靠它保证 emit 一定发生在自己（和 C++ 对象）
+        # 还在的时候，而不是被销毁之后。
+        self._game_exit_seen = threading.Event()
 
     @Slot()
     def run(self) -> None:
@@ -101,9 +110,14 @@ class LaunchWorker(QObject):
                             "游戏可能启动失败（详情见日志文件）")
             self.on_status("正在启动辅助工具…")
             service.start_tools()
-            service.start_game(command, on_game_exit=self._on_game_exit)
+            game = service.start_game(command, on_game_exit=self._on_game_exit)
             self.on_status("Minecraft 运行中")
             self.service_ready.emit(service)
+            # 守到游戏退出为止 —— 见类文档：本对象必须活满整场游戏，
+            # 否则退出回调会打到已销毁的 C++ 对象上（Signal source has been deleted）。
+            game.proc.wait()
+            if not self._game_exit_seen.wait(timeout=15):
+                log.warning("等待游戏退出回调超时（界面可能没收到退出事件）")
         except (AuthError, FileNotFoundError, ValueError, RuntimeError, OSError) as exc:
             log.exception("启动失败")
             self.failed.emit(str(exc))
@@ -114,7 +128,13 @@ class LaunchWorker(QObject):
             self.finished.emit()
 
     def _on_game_exit(self, code: int, duration: float) -> None:
+        """在**看门线程**里被调用，不能在此时碰任何界面对象。
+
+        emit 本身是线程安全的（跨线程会排到主线程执行），但对象必须还活着，
+        所以先发信号再置事件，run() 见到事件才会返回。
+        """
         self.game_exited.emit(code, duration)
+        self._game_exit_seen.set()
 
 
 class GameExitWorker(QObject):
