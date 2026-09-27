@@ -178,6 +178,16 @@ def _preset_flags(preset: str) -> list[str]:
     return []
 
 
+def preset_flags(preset: str) -> list[str]:
+    """预设会额外加上哪些参数（界面用来显示"这个预设加几个参数"，别再各写一份）。"""
+    return _preset_flags(preset)
+
+
+def split_args(text: str) -> list[str]:
+    """把界面上那一行参数文本切成列表（界面显示条数用）。"""
+    return _split(text)
+
+
 def _log4j_flag(version: MinecraftVersion) -> list[str]:
     """版本目录里有 HMCL 生成的 log4j2.xml 就用它（它已打上 log4shell 补丁）。"""
     candidate = version.game_dir / "log4j2.xml"

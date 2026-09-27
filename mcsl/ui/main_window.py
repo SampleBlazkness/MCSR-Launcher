@@ -225,9 +225,9 @@ class MainWindow(QMainWindow):
         self.memory_spin.setSingleStep(512)
         self.memory_spin.setSuffix(" MB")
         self.preset_combo = QComboBox()
-        for label, value in (("自定义（自己填参数）", "custom"),
-                             ("Aikar 基线", "aikar"),
-                             ("仅加固参数", "vanilla")):
+        for label, value in (("自定义（不套预设）", "custom"),
+                             ("Aikar 基线（G1GC 调参 + 加固）", "aikar"),
+                             ("仅加固参数（只加 log4shell / RMI 防护）", "vanilla")):
             self.preset_combo.addItem(label, value)
         self.extra_args_edit = QLineEdit()
         self.extra_args_edit.setPlaceholderText("-XX:+UseG1GC -Dfile.encoding=GB18030 …")
@@ -249,6 +249,10 @@ class MainWindow(QMainWindow):
         form.addRow("最大内存", self.memory_spin)
         form.addRow("参数预设", self.preset_combo)
         form.addRow("追加 JVM 参数", self.extra_args_edit)
+        self.jvm_hint = QLabel()
+        self.jvm_hint.setWordWrap(True)
+        self.jvm_hint.setStyleSheet("color:#8a8a8a;")
+        form.addRow("", self.jvm_hint)
         form.addRow("", self.per_instance_check)
         form.addRow("窗口分辨率", res_widget)
         layout.addWidget(base)
@@ -266,7 +270,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(behaviour)
         layout.addStretch(1)
 
+        self.preset_combo.currentIndexChanged.connect(self._refresh_jvm_hint)
         self.preset_combo.currentIndexChanged.connect(self._on_jvm_edited)
+        self.extra_args_edit.textChanged.connect(self._refresh_jvm_hint)
         self.memory_spin.valueChanged.connect(self._on_jvm_edited)
         self.extra_args_edit.textEdited.connect(self._on_jvm_edited)
         self.per_instance_check.toggled.connect(self._on_per_instance_toggled)
@@ -418,6 +424,7 @@ class MainWindow(QMainWindow):
         self._pin_auth_settings()
         # 实例/配置一变，Java 那一行的提示就要跟着重算（否则切实例后还显示上一个实例的判断）
         self._refresh_java_hint()
+        self._refresh_jvm_hint()
 
         storage = ("DPAPI 加密（绑定当前 Windows 用户，拷到别的机器解不开）"
                    if dpapi_available() else "⚠ DPAPI 不可用，凭据以明文保存")
@@ -674,6 +681,51 @@ class MainWindow(QMainWindow):
             log.debug("扫描 Java 失败：%s", exc)
             self._java_installs = []
         self._java_scanned = True
+
+    @Slot()
+    def _refresh_jvm_hint(self) -> None:
+        """把「参数预设」和「追加 JVM 参数」的关系写在界面上。
+
+        实际行为（mcsl/launch/command.py 的 build_command）：预设先贡献它自己的一套参数，
+        然后**无论选哪个预设**都会把"追加 JVM 参数"那行拼到后面。所以不能把那一行改名成
+        "自定义参数" —— 那样会谎报（非自定义时它也生效）。这里把叠加关系说清楚。
+        """
+        from ..launch.command import preset_flags, split_args
+
+        preset = self.preset_combo.currentData() or "custom"
+        count = len(preset_flags(preset))
+        extra_count = len(split_args(self.extra_args_edit.text()))
+        if preset == "custom":
+            what = "「自定义」不套任何预设参数"
+        elif preset == "aikar":
+            what = f"「Aikar 基线」会先加上 Aikar 的 G1GC 调参和 log4shell / RMI 加固（{count} 个）"
+        elif preset == "vanilla":
+            what = (f"「仅加固参数」只会加上 log4shell / RMI 防护（{count} 个），"
+                    f"不碰 GC 相关的调参")
+        else:
+            what = f"预设 {preset} 会加上 {count} 个参数"
+        self.jvm_hint.setText(
+            f"{what}；下面那行「追加 JVM 参数」无论选哪个预设都会追加到最后"
+            f"（当前 {extra_count} 个参数）。"
+            + self._jvm_overlap_warning(preset))
+
+    def _jvm_overlap_warning(self, preset: str) -> str:
+        """预设和追加参数撞了同一批 JVM 选项时提醒一句。
+
+        两套参数都带 `-XX:G1NewSizePercent=…` 这种同名前缀时，后出现的那个生效 ——
+        这是 JVM 的行为，不是 bug，但用户看到"我设了却没效果"会一头雾水。
+        """
+        from ..launch.command import preset_flags, split_args
+
+        if preset == "custom":
+            return ""
+        preset_keys = {flag.split("=")[0].lower() for flag in preset_flags(preset)}
+        clashes = [flag for flag in split_args(self.extra_args_edit.text())
+                   if flag.split("=")[0].lower() in preset_keys]
+        if not clashes:
+            return ""
+        return f" ⚠ 其中 {len(clashes)} 个与预设重复（同一选项后面的会覆盖前面的）：" \
+               + " ".join(clashes[:3]) + ("…" if len(clashes) > 3 else "")
 
     def _on_jvm_edited(self, *_args) -> None:
         if self._loading:

@@ -149,6 +149,34 @@ def main() -> int:
               hint_after != hint_before and target in hint_after,
               f"切换前 {hint_before[:40]} → 切换后 {hint_after[:60]}")
 
+    print("\n=== 预设与追加参数的关系有说明（用户问过这条）===")
+    hint = window.jvm_hint.text()
+    check("提示里写明了「追加 JVM 参数」始终生效",
+          "无论选哪个预设都会追加" in hint, hint[:110])
+    window.preset_combo.setCurrentIndex(window.preset_combo.findData("vanilla"))
+    app.processEvents()
+    check("切到「仅加固参数」后说明随之更新",
+          "仅加固" in window.jvm_hint.text(), window.jvm_hint.text()[:90])
+    window.preset_combo.setCurrentIndex(window.preset_combo.findData("aikar"))
+    app.processEvents()
+    check("切到「Aikar 基线」后说明提到 G1GC",
+          "G1GC" in window.jvm_hint.text(), window.jvm_hint.text()[:90])
+    window.preset_combo.setCurrentIndex(window.preset_combo.findData("custom"))
+    app.processEvents()
+    check("切回「自定义」后说明变成不套预设",
+          "不套任何预设参数" in window.jvm_hint.text(), window.jvm_hint.text()[:90])
+
+    # 预设与追加参数撞同名选项时要提醒（同一选项后面的覆盖前面的）
+    window.preset_combo.setCurrentIndex(window.preset_combo.findData("aikar"))
+    window.extra_args_edit.setText("-XX:+UseG1GC -XX:MaxGCPauseMillis=10")
+    app.processEvents()
+    check("预设与追加参数重复时给出提醒",
+          "与预设重复" in window.jvm_hint.text(), window.jvm_hint.text()[-90:])
+    window.extra_args_edit.setText("")
+    window.preset_combo.setCurrentIndex(window.preset_combo.findData("custom"))
+    app.processEvents()
+    check("不重复时不出现提醒", "与预设重复" not in window.jvm_hint.text())
+
     print("\n=== 账号栏 ===")
     window._refresh_account_bar()
     check("未登录时显示提示", "未登录" in window.account_label.text())

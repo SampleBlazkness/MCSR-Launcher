@@ -227,6 +227,53 @@ def test_java() -> None:
     check("空列表返回 None", pick_best([], 8) is None)
 
 
+def test_jvm_preset_semantics() -> None:
+    """「参数预设」与「追加 JVM 参数」的关系（用户在界面上问过这条）。
+
+    真实行为：预设先贡献它自己的一套参数，然后把"追加 JVM 参数"那行**无条件**拼到后面。
+    也就是说不论选自定义还是别的，那一行都生效 —— 所以界面不能把它标成"自定义参数"。
+    这条断言把语义钉死，免得以后有人顺手改成"只有自定义才追加"。
+    """
+    from mcsl.launch.command import preset_flags
+
+    cfg = load_config()
+    mc_dir = Path(cfg.launch.minecraft_dir)
+    if not mc_dir.is_dir():
+        print(f"[skip] 找不到 .minecraft（{mc_dir}），跳过预设语义检查")
+        return
+    instance = cfg.launch.instance
+    marker = "-Dmcsl.selftest.marker=1"
+
+    counts = {name: len(preset_flags(name)) for name in ("custom", "aikar", "vanilla")}
+    check("自定义预设不自带任何参数", counts["custom"] == 0, str(counts))
+    check("Aikar 基线自带 G1GC 调参 + 加固（多于仅加固）",
+          counts["aikar"] > counts["vanilla"] > 0, str(counts))
+
+    class _Session:
+        uuid, name, access_token = "0" * 32, "Selftest", "dummy"
+        token_type, client_id, xuid = "Bearer", "00000000402b5328", "0"
+
+    # build_command 会校验 java 可执行文件存在，所以得给它一个真路径
+    import shutil
+
+    java_path = cfg.launch.effective(instance).java_path or shutil.which("java") or ""
+    if not Path(java_path).is_file():
+        print(f"[skip] 本机没有可用的 java（{java_path!r}），跳过命令行组装检查")
+        return
+
+    for preset in ("custom", "aikar", "vanilla"):
+        launch = cfg.launch.effective(instance)
+        launch.jvm_preset = preset
+        launch.jvm_args_extra = marker
+        try:
+            version = load_version(mc_dir, instance)
+            cmd = build_command(version, _Session(), launch, java_path=java_path)
+        except Exception as exc:  # noqa: BLE001
+            check(f"预设 {preset} 能组装出命令行", False, f"{type(exc).__name__}: {exc}")
+            continue
+        check(f"预设 {preset}：追加参数依然出现在命令行里", marker in cmd.argv())
+
+
 def test_wording() -> None:
     """面向用户的文案里不许出现只对某台机器/某个人成立的措辞。
 
@@ -254,6 +301,8 @@ def main() -> int:
     test_instances()
     print("-" * 60)
     test_java()
+    print("-" * 60)
+    test_jvm_preset_semantics()
     print("-" * 60)
     test_wording()
     print("-" * 60)
