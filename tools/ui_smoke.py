@@ -112,59 +112,40 @@ def main() -> int:
     window._refresh_account_bar()
     check("未登录时显示提示", "未登录" in window.account_label.text())
 
-    print("\n=== 登录方式与 client_id 的冲突检测（实测过的死路）===")
-    # 实测：公开 id 没有登记 localhost 回调，浏览器授权必失败（redirect_uri is not valid），
-    # 所以在点登录前就该拦下来，而不是让用户在浏览器里看到一句英文报错。
-    old_flow, old_client = window.cfg.auth.flow, window.cfg.auth.client_id
-    window.cfg.auth.flow = "auth_code"
-    window.cfg.auth.client_id = "00000000402b5328"
-    problem = window._browser_flow_problem()
-    check("公开 id + 浏览器授权 → 拦下来并解释原因",
-          bool(problem) and "redirect_uri" in problem, str(problem)[:70])
+    print("\n=== 登录方式只剩设备码（界面上不该再有这些选项）===")
+    from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit
+    auth_tab = window.tabs.widget(3)          # 0 路径 1 启动设置 2 辅助工具 3 账号与登录
+    combos = auth_tab.findChildren(QComboBox)
+    edits = auth_tab.findChildren(QLineEdit)
+    check("账号页没有任何下拉框（端点预设/登录方式已移除）", not combos,
+          f"{[c.currentText() for c in combos]}")
+    check("账号页没有 client_id 输入框", not edits, f"{[e.text() for e in edits]}")
+    check("页面上写清了设备码流程",
+          any("设备码" in lbl.text() for lbl in auth_tab.findChildren(QLabel)))
 
-    window.cfg.auth.client_id = "11112222-3333-4444-5555-666677778888"
-    check("自己注册的 Azure id + 浏览器授权 → 不拦",
-          window._browser_flow_problem() is None)
-
-    window.cfg.auth.flow = "device_code"
-    window.cfg.auth.client_id = "00000000402b5328"
-    check("公开 id + 设备码（当前默认组合）→ 不拦",
-          window._browser_flow_problem() is None)
-    window.cfg.auth.flow, window.cfg.auth.client_id = old_flow, old_client
-
-    print("\n=== 走不通的选项不该出现在下拉框里 ===")
-    window.client_id_edit.setText("00000000402b5328")
-    window._refresh_auth_options()
-    presets = [window.preset_auth_combo.itemData(i) for i in range(window.preset_auth_combo.count())]
-    flows = [window.flow_combo.itemData(i) for i in range(window.flow_combo.count())]
-    check("公开 id：端点预设只剩 live", presets == ["live"], str(presets))
-    check("公开 id：登录方式只剩设备码", flows == ["device_code"], str(flows))
-
-    window.client_id_edit.setText("11112222-3333-4444-5555-666677778888")
-    window._refresh_auth_options()
-    presets = [window.preset_auth_combo.itemData(i) for i in range(window.preset_auth_combo.count())]
-    flows = [window.flow_combo.itemData(i) for i in range(window.flow_combo.count())]
-    check("填了自己的 client_id 后 v2 与浏览器授权自动回来",
-          presets == ["live", "v2"] and flows == ["device_code", "auth_code"],
-          f"{presets} / {flows}")
-
-    # 手改 config.json 塞进死配置时，载入界面应该自动退回可用项
-    dead = load_config()
-    dead.auth.client_id = "00000000402b5328"
-    dead.auth.endpoint_preset = "v2"
-    dead.auth.flow = "auth_code"
-    window_dead = MainWindow(dead)
-    window_dead.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-    window_dead.show()
+    # 老配置里残留的 v2 / auth_code / 空 client_id 要在载入时被改回可用值
+    stale = load_config()
+    stale.auth.endpoint_preset = "v2"
+    stale.auth.flow = "auth_code"
+    stale.auth.client_id = ""
+    window_stale = MainWindow(stale)
+    window_stale.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window_stale.show()
     app.processEvents()
-    check("手改过的死配置载入后自动退回 live",
-          window_dead.preset_auth_combo.currentData() == "live",
-          str(window_dead.preset_auth_combo.currentData()))
-    check("手改过的死配置载入后自动退回设备码",
-          window_dead.flow_combo.currentData() == "device_code",
-          str(window_dead.flow_combo.currentData()))
-    window_dead.close()
-    window_dead.deleteLater()
+    check("残留的 v2 预设被改回 live",
+          window_stale.cfg.auth.endpoint_preset == "live",
+          str(window_stale.cfg.auth.endpoint_preset))
+    check("残留的 auth_code 被改回 device_code",
+          window_stale.cfg.auth.flow == "device_code", str(window_stale.cfg.auth.flow))
+    check("空的 client_id 自动填成公开 id",
+          window_stale.cfg.auth.client_id == "00000000402b5328",
+          window_stale.cfg.auth.client_id)
+    stale_collected = window_stale._collect_from_ui()
+    check("保存出去的配置也是固定的 live + device_code",
+          stale_collected.auth.endpoint_preset == "live"
+          and stale_collected.auth.flow == "device_code")
+    window_stale.close()
+    window_stale.deleteLater()
     app.processEvents()
 
     window.close()

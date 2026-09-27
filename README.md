@@ -11,7 +11,7 @@
 
 | 旧流程的痛点 | 现在的做法 |
 | --- | --- |
-| 每次启动都要用 HMCL 导出脚本拿 access_token，手粘进 ps1 | 启动器自己走微软 OAuth（设备码 / 浏览器授权）→ Xbox Live → XSTS → Minecraft Services，**登录一次，之后自动续期** |
+| 每次启动都要用 HMCL 导出脚本拿 access_token，手粘进 ps1 | 启动器自己走微软 OAuth（**设备码**：显示一个 8 位码，去 microsoft.com/link 输入）→ Xbox Live → XSTS → Minecraft Services，**登录一次，之后自动续期** |
 | `access_token` 明文写在脚本里、还躺在桌面上 | refresh token 用 Windows **DPAPI 加密**存在 `%LOCALAPPDATA%\MCSR-Launcher\accounts.dat`，仓库与 OneDrive 里都没有 |
 | Jingle 关了不掉（提权进程 + UIPI），错误被 `-ErrorAction SilentlyContinue` 吞掉 | 工具由启动器自己启动、自己持有 PID；启动器默认以管理员身份运行，关闭时逐级降级（WM_CLOSE → 强杀 → 提权 taskkill）并**记录每一步的成功/失败原因** |
 | OBS 关不掉（原因未定位） | 退出后弹窗询问；关闭过程写诊断日志，能直接看出卡在哪一步 |
@@ -65,7 +65,8 @@ python -m venv .venv
 
 首次运行：
 
-1. 「账号与登录」页确认 `client_id` 与端点预设（默认是 `live` + 官方启动器的公开 id，开箱可用）。
+1. 「账号与登录」页**不需要配任何东西**：登录只有设备码一种方式，点登录 → 出现设备码 →
+   浏览器打开 microsoft.com/link 输入 → 完成。
 2. 点右上角「登录微软账号」，浏览器打开 `https://www.microsoft.com/link` 输入界面上的代码。
    登录成功后 refresh token 会加密落盘，**以后不用再登**。
 3. 「路径与实例」页选好 `.minecraft` 目录、四个工具路径、Java 路径，选实例。
@@ -120,7 +121,8 @@ JVM 参数之后，实际能用的版本经常和它不一样。这台机器就�
 
 ```
 mcsl/
-  auth/        微软 OAuth（设备码 + 浏览器授权码 PKCE）/ XBL / XSTS / Minecraft Services / DPAPI 凭据存储
+  auth/        微软 OAuth（设备码流程；浏览器授权码 PKCE 的实现也在，但界面不暴露）/ XBL / XSTS /
+               Minecraft Services / DPAPI 凭据存储
   launch/      版本 JSON 解析（含 inheritsFrom 合并）、rules 求值、natives、命令行组装、进程管理
                java.py：扫描本机所有 Java 并识别版本（注册表 / PATH / JAVA_HOME / 常见安装目录）
   tools/       Jingle / NinjabrainBot / OBS 的启动与关闭（纯 ctypes 的 Windows 进程/窗口操作）
@@ -175,10 +177,15 @@ tools/
 - 日志会把疑似 token 替换成 `<redacted>`。
 - 如实说明：java 命令行里必然带 access_token，同一用户的其他进程能看到它。
   这是启动 Minecraft 的固有性质（HMCL、官方启动器同理），不是本程序引入的。
-- 借用了官方启动器的公开 `client_id` 作为默认值。想要完全自主，就注册一个自己的
-  Azure 应用（免费）：应用注册 → 支持的账户类型选「仅个人 Microsoft 账户」→
-  重定向 URI 填 `http://localhost:29111` → 「允许公共客户端流」设为是 →
-  把 Application (client) ID 填进界面，端点预设切到 `v2` 即可。
+- 借用了官方启动器的公开 `client_id`（`00000000402b5328`）。它只在 Live Connect 端点上可用：
+  实测 v2 端点会拒（`AADSTS700016`），浏览器授权也会失败（公开 id 没有登记 localhost 回调，
+  授权页直接报 `redirect_uri is not valid`）。所以界面把登录固定成「live 端点 + 设备码」，
+  另外两条路从界面上删掉了 —— 不是不能实现，是**用这个 client_id 走不通**，
+  留着只会让人踩坑。想用它们（或想不依赖公开 id）就去注册一个免费的 Azure 应用：
+  应用注册 → 支持的账户类型选「仅个人 Microsoft 账户」→ 重定向 URI 填
+  `http://localhost:29111` → 「允许公共客户端流」设为是；然后把 `config.json` 里的
+  `auth.client_id` 换成自己的、`auth.endpoint_preset` 改 `v2`（界面暂不暴露这两个字段，
+  需要时可以直接改配置文件，或让我把选项加回来）。
 
 ---
 

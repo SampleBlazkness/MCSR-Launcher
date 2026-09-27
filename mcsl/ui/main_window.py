@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFor
 
 from .. import APP_NAME, APP_VERSION
 from ..auth.manager import AccountManager
+from ..auth.oauth import DEFAULT_CLIENT_ID
 from ..auth.store import dpapi_available
 from ..config import CLOSE_ALWAYS, CLOSE_ASK, CLOSE_NEVER, AppConfig, load_config, save_config
 from ..launch.launcher import LaunchService
@@ -88,12 +89,12 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self._build_account_bar())
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_paths_tab(), "路径与实例")
-        tabs.addTab(self._build_launch_tab(), "启动设置")
-        tabs.addTab(self._build_tools_tab(), "辅助工具")
-        tabs.addTab(self._build_auth_tab(), "账号与登录")
-        root.addWidget(tabs, 1)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_paths_tab(), "路径与实例")
+        self.tabs.addTab(self._build_launch_tab(), "启动设置")
+        self.tabs.addTab(self._build_tools_tab(), "辅助工具")
+        self.tabs.addTab(self._build_auth_tab(), "账号与登录")
+        root.addWidget(self.tabs, 1)
 
         # 操作按钮
         buttons = QHBoxLayout()
@@ -302,26 +303,17 @@ class MainWindow(QMainWindow):
         box = QGroupBox("微软登录")
         form = QFormLayout(box)
 
-        self.client_id_edit = QLineEdit()
-        self.client_id_edit.setPlaceholderText("Azure 应用的 Application (client) ID")
-        self.preset_auth_combo = QComboBox()
-        self.preset_auth_combo.addItem("live（login.live.com，配合官方公开 id）", "live")
-        self.flow_combo = QComboBox()
-        self.flow_combo.addItem("设备码（显示一个代码，去网页输入）", "device_code")
-
-        form.addRow("client_id", self.client_id_edit)
-        form.addRow("端点预设", self.preset_auth_combo)
-        form.addRow("登录方式", self.flow_combo)
-
-        endpoints_hint = QLabel(
-            "用官方公开 id 时只有「live + 设备码」这一条路走得通，所以下拉框里就只有它："
-            "v2 端点要求 client_id 是你自己注册的 Azure 应用（公开 id 会被拒，AADSTS700016），"
-            "浏览器授权要回调到本机 127.0.0.1，公开 id 也没登记这种回调（实测报 "
-            "redirect_uri is not valid）。把上面的 client_id 换成自己注册的应用 id 之后，"
-            "这两个选项会自动出现在下拉框里。")
-        endpoints_hint.setWordWrap(True)
-        endpoints_hint.setStyleSheet("color:#8a8a8a;")
-        form.addRow("", endpoints_hint)
+        how = QLabel(
+            "登录方式固定为「设备码」，没有任何需要你选的配置：\n"
+            "1. 点上方账号栏的「重新登录」（首次启动时也会自动提示登录）\n"
+            "2. 弹出的窗口里显示一个 8 位设备码\n"
+            "3. 浏览器打开 https://www.microsoft.com/link ，输入这个码\n"
+            "4. 用你的微软账号确认登录 —— 成功后启动器自动继续，不用再管\n\n"
+            "登进去之后 access_token 自动获取、过期自动续期，不会让你再去 HMCL 导出脚本。\n"
+            "凭据用 Windows DPAPI 加密存在本机（只有当前 Windows 用户能解开），"
+            "不进仓库、不同步到云端。")
+        how.setWordWrap(True)
+        form.addRow("", how)
 
         layout.addWidget(box)
 
@@ -343,60 +335,7 @@ class MainWindow(QMainWindow):
 
         self.relogin_button.clicked.connect(self._on_relogin_clicked)
         self.logout_button.clicked.connect(self._on_logout)
-        self.auth_changed_widgets = [self.client_id_edit, self.preset_auth_combo, self.flow_combo]
-        for widget in self.auth_changed_widgets:
-            signal = getattr(widget, "textEdited", None) or widget.currentIndexChanged
-            signal.connect(self._on_auth_edited)
-        # client_id 一变，下拉框的可用项就要跟着变（用公开 id 时把走不通的选项删掉）。
-        # 打字过程中不重建控件，所以用一个单次定时器做去抖。
-        self._auth_options_timer = QTimer(self)
-        self._auth_options_timer.setSingleShot(True)
-        self._auth_options_timer.setInterval(400)
-        self._auth_options_timer.timeout.connect(self._refresh_auth_options)
-        self.client_id_edit.textEdited.connect(self._schedule_auth_options_refresh)
         return page
-
-    @Slot()
-    def _schedule_auth_options_refresh(self) -> None:
-        self._auth_options_timer.start()
-
-    @Slot()
-    def _refresh_auth_options(self) -> None:
-        """按当前 client_id 决定下拉框里有哪些选项 —— 走不通的直接删掉，而不是留着踩。
-
-        官方公开 id 在微软那边既没有 Azure 应用（v2 端点会拒，AADSTS700016），
-        也没登记 localhost 回调（浏览器授权会报 redirect_uri is not valid），
-        所以只有「live + 设备码」这一条路。填了自己注册的 client_id 后，
-        v2 和浏览器授权会自动回到下拉框里，授权码流程的代码因此不用删。
-        """
-        from ..auth.oauth import DEFAULT_CLIENT_ID
-
-        custom = self.client_id_edit.text().strip() not in ("", DEFAULT_CLIENT_ID)
-        wanted = (
-            (self.preset_auth_combo,
-             [("live（login.live.com，配合官方公开 id）", "live")]
-             + ([("v2（microsoftonline，配合自己注册的应用）", "v2")] if custom else [])),
-            (self.flow_combo,
-             [("设备码（显示一个代码，去网页输入）", "device_code")]
-             + ([("浏览器授权（自动打开浏览器回调）", "auth_code")] if custom else [])),
-        )
-        for combo, items in wanted:
-            if [combo.itemData(i) for i in range(combo.count())] == [d for _, d in items]:
-                continue
-            previous = combo.currentData()
-            combo.blockSignals(True)
-            combo.clear()
-            for label, data in items:
-                combo.addItem(label, data)
-            index = combo.findData(previous)
-            if index < 0:
-                # 原来是走不通的那个（手改过 config.json 也会到这儿）：退回默认项并说明
-                if previous:
-                    log.warning("登录设置里的 %s 在公开 id 下不可用，已退回到 %s",
-                                previous, combo.itemData(0))
-                index = 0
-            combo.setCurrentIndex(index)
-            combo.blockSignals(False)
 
     # ================================================================= 载入/保存
     def _load_into_ui(self) -> None:
@@ -436,10 +375,7 @@ class MainWindow(QMainWindow):
             self._select_combo(widgets["close"], tool.close_on_exit)
             widgets["delay"].setValue(int(tool.start_delay_ms))
 
-        self.client_id_edit.setText(cfg.auth.client_id)
-        self._refresh_auth_options()          # 先按 client_id 决定有哪些选项，再选中
-        self._select_combo(self.preset_auth_combo, cfg.auth.endpoint_preset)
-        self._select_combo(self.flow_combo, cfg.auth.flow)
+        self._pin_auth_settings()
 
         storage = ("DPAPI 加密（绑定当前 Windows 用户，拷到别的机器解不开）"
                    if dpapi_available() else "⚠ DPAPI 不可用，凭据以明文保存")
@@ -448,6 +384,22 @@ class MainWindow(QMainWindow):
             f"加密方式：{storage}\n"
             f"配置文件：{data_root() / 'config.json'}（本仓库 .gitignore 已排除这些路径）")
         self._refresh_account_bar()
+
+    def _pin_auth_settings(self) -> None:
+        """登录方式固定为「live 端点 + 设备码」，配置里残留的旧值一律改回来。
+
+        界面不再暴露 client_id / 端点预设 / 登录方式：公开 id 只有这一条路走得通，
+        v2 端点需要自己注册的 Azure 应用，浏览器授权需要自己登记的 localhost 回调。
+        留着一堆选不动的选项只会让人困惑（用户明确要求"只用做设备码这一种"）。
+        """
+        cfg = self.cfg
+        if cfg.auth.endpoint_preset != "live" or cfg.auth.flow != "device_code":
+            log.info("登录设置固定为 live + 设备码（配置里原来是 %s / %s）",
+                     cfg.auth.endpoint_preset, cfg.auth.flow)
+        cfg.auth.endpoint_preset = "live"
+        cfg.auth.flow = "device_code"
+        if not cfg.auth.client_id.strip():
+            cfg.auth.client_id = DEFAULT_CLIENT_ID
 
     def _collect_from_ui(self) -> AppConfig:
         cfg = self.cfg
@@ -497,9 +449,11 @@ class MainWindow(QMainWindow):
             tool.close_on_exit = widgets["close"].currentData()
             tool.start_delay_ms = widgets["delay"].value()
 
-        cfg.auth.client_id = self.client_id_edit.text().strip()
-        cfg.auth.endpoint_preset = self.preset_auth_combo.currentData()
-        cfg.auth.flow = self.flow_combo.currentData()
+        # 登录方式固定（界面上没有这些选项了），保存时保持规范值
+        cfg.auth.endpoint_preset = "live"
+        cfg.auth.flow = "device_code"
+        if not cfg.auth.client_id.strip():
+            cfg.auth.client_id = DEFAULT_CLIENT_ID
         return cfg
 
     def _on_save_clicked(self) -> None:
@@ -692,9 +646,6 @@ class MainWindow(QMainWindow):
         else:
             self.status.showMessage("内存/JVM 参数改回全局生效（当前实例的独立设置会被清除）", 4000)
 
-    def _on_auth_edited(self, *_args) -> None:
-        self.status.showMessage("登录相关设置已修改，点“保存配置”后生效", 4000)
-
     def _refresh_instances(self, reload_only: bool = False) -> None:
         cfg = self.cfg if (reload_only or self._loading) else self._collect_from_ui()
         mc_dir = Path(cfg.launch.minecraft_dir) if cfg.launch.minecraft_dir else None
@@ -750,28 +701,6 @@ class MainWindow(QMainWindow):
             self.accounts.select(uuid)
             self._refresh_account_bar()
 
-    def _browser_flow_problem(self) -> str | None:
-        """选了"浏览器授权"但 client_id 不可能成功时，返回一句解释；否则 None。
-
-        实测（不是推测）：浏览器授权要回调到本机 127.0.0.1 的端口，而官方那个公开
-        client_id 00000000402b5328 在微软那边没有登记 localhost 回调，authorize 端点
-        直接返回 invalid_request: redirect_uri is not valid —— 用户在浏览器里只会看到
-        一句英文报错。所以这里提前拦住，并且只拦这一个确定失败的组合。
-        """
-        auth = self.cfg.auth
-        if auth.flow != "auth_code":
-            return None
-        from ..auth.oauth import DEFAULT_CLIENT_ID
-
-        if auth.client_id.strip() != DEFAULT_CLIENT_ID:
-            return None
-        return ("当前用的是官方启动器的公开 client_id，它在微软那边没有登记 "
-                "localhost 回调，浏览器授权会失败（授权页会报 "
-                "redirect_uri is not valid）。\n\n"
-                "要么改用设备码登录，要么去 Azure 注册一个自己的应用，"
-                "把回调地址登记为 http://localhost:29111/callback 之类，"
-                "再把 client_id 换成自己的、端点预设切到 v2。")
-
     def _on_login_clicked(self, force: bool = False) -> None:
         if self._login_dialog is not None:
             return
@@ -781,27 +710,6 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
         self.accounts.cfg = self.cfg.auth
-
-        problem = self._browser_flow_problem()
-        if problem:
-            box = QMessageBox(self)
-            box.setWindowTitle("浏览器授权这条路走不通")
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setText(problem)
-            switch = box.addButton("改用设备码登录", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(switch)
-            box.exec()
-            if box.clickedButton() is not switch:
-                return
-            self.cfg.auth.flow = "device_code"
-            self._select_combo(self.flow_combo, "device_code")
-            self.accounts.cfg = self.cfg.auth
-            try:
-                save_config(self.cfg)
-            except OSError:
-                pass
-            self._append_log("已把登录方式切回设备码（浏览器授权需要自己注册的 client_id）")
 
         dialog = LoginDialog(self.cfg, self.accounts, self)
         dialog.succeeded.connect(self._on_login_succeeded)
