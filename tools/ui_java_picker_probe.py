@@ -25,7 +25,7 @@ os.environ.setdefault("MCSL_DATA_DIR", str(Path(tempfile.gettempdir()) / "mcsl-j
 os.environ["MCSL_NO_ELEVATE"] = "1"
 
 from PySide6.QtCore import Qt                                      # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog                # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QLabel        # noqa: E402
 
 from mcsl.config import load_config                                # noqa: E402
 from mcsl.launch.java import find_java_installations               # noqa: E402
@@ -75,11 +75,13 @@ def main() -> int:
     check("列表不只一行（旧逻辑只会挑一个）", rows >= 2, f"{rows} 行")
 
     first = dialog.table.item(0, 0).data(Qt.ItemDataRole.UserRole)
-    check("第一行是匹配 Java 8 的那个", first is not None and first.major == 8,
+    check("第一行是符合声明的那个（Java 8）", first is not None and first.major == 8,
           f"第一行 = {first.version_label if first else '空'}")
-    check("默认预选的就是第一行", dialog.table.currentRow() == 0,
-          f"currentRow={dialog.table.currentRow()}")
-    check("匹配列写着 ✓ 匹配", "✓" in dialog.table.item(0, 1).text(),
+    selected = dialog.table.item(dialog.table.currentRow(), 0).data(Qt.ItemDataRole.UserRole)
+    check("默认选中的是【当前配置的】那个，不是声明要求的那个",
+          selected is not None and selected.major == java_high.major,
+          f"选中 = {selected.version_label if selected else '空'}")
+    check("符合声明的那行标着 ✓ 符合", "✓" in dialog.table.item(0, 1).text(),
           dialog.table.item(0, 1).text())
 
     current_label = [dialog.table.item(r, 0).text() for r in range(rows)
@@ -88,50 +90,45 @@ def main() -> int:
           str(current_label))
 
     summary = dialog.summary.text()
-    check("概要说清了匹配数量", "匹配 Java 8" in summary, summary[:80])
+    check("概要说清了符合声明的数量", "符合声明的 Java 8" in summary, summary[:80])
+    check("对话框里写明了\"声明只是发布时的信息\"这一提醒",
+          "发布时" in summary or any("发布时" in w.text() for w in dialog.findChildren(QLabel)),
+          "在 caveat 标签里")
 
     dialog.only_match.setChecked(True)
     app.processEvents()
     all_match = all(dialog.table.item(r, 1).text().startswith("✓")
                     for r in range(dialog.table.rowCount()))
-    check("勾上\"只显示匹配的版本\"后只剩匹配的", all_match and dialog.table.rowCount() >= 1,
-          f"{dialog.table.rowCount()} 行")
+    check("勾上\"只显示符合声明的版本\"后只剩符合的",
+          all_match and dialog.table.rowCount() >= 1, f"{dialog.table.rowCount()} 行")
     dialog.only_match.setChecked(False)
     app.processEvents()
 
     dialog.table.selectRow(0)
     dialog.use_button.click()
-    check("点\"使用所选\"选中了 Java 8 并 accept",
+    check("选中 Java 8 后点\"使用所选\"能正常 accept",
           dialog.selected is not None and dialog.selected.major == 8
           and dialog.result() == QDialog.DialogCode.Accepted,
           f"selected={dialog.selected.version_label if dialog.selected else 'None'}")
     dialog.deleteLater()
 
-    # ---------------------------------------------------------------- 主窗口提示行
+    # ------------------------------------------------ 主窗口：比声明【高】不报警（本机真实情况）
     cfg = load_config()
-    cfg.launch.instance = "1.16.1"
-    cfg.launch.java_path = str(java_high.path)     # 故意配错：1.16.1 要 Java 8
+    cfg.launch.instance = "1.16.1"          # 版本 JSON 声明 Java 8
+    cfg.launch.instances.pop("1.16.1", None)   # 前面用例可能已写进实例覆盖
+    cfg.launch.java_path = str(java_high.path)   # 实际用 Java 25，这才是对的
     window = MainWindow(cfg)
     window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
     window.show()
     app.processEvents()
 
-    check("提示行指出当前 Java 与实例不符",
-          "需要 Java 8" in window.java_hint.text() and "✗" in window.java_hint.text(),
-          window.java_hint.text()[:90])
-    check("出现\"换成 Java 8\"按钮", window.java_fix_button.isVisible()
-          and "Java 8" in window.java_fix_button.text(),
-          window.java_fix_button.text())
-    window.grab().save(str(SHOTS / "launch_page_java_hint.png"))
-
-    window.java_fix_button.click()
-    app.processEvents()
-    picked = window.picker_java.value()
-    check("一键替换真的把路径换成了 Java 8",
-          java8.path.name in picked or str(java8.path).lower() == picked.lower(),
-          f"picker={picked}")
-    check("换完之后提示行变绿", "✓" in window.java_hint.text(),
-          window.java_hint.text()[:90])
+    hint = window.java_hint.text()
+    check("比声明高时不再报红（不出现 ✗）", "✗" not in hint and "●" in hint, hint[:100])
+    check("提示里说明了那是\"版本 JSON 的声明\"", "声明" in hint, hint[:100])
+    check("比声明高时不出现\"换成 Java 8\"这种反向按钮",
+          not window.java_fix_button.isVisible(), window.java_fix_button.text())
+    check("比声明高时不拦启动", window._confirm_java_version() is True)
+    window.grab().save(str(SHOTS / "launch_page_java_newer.png"))
 
     # 每实例存储：勾上"只对当前实例生效"后，java 应写进实例覆盖而不是全局
     window.per_instance_check.setChecked(True)
@@ -139,30 +136,56 @@ def main() -> int:
     collected = window._collect_from_ui()
     override = collected.launch.instances.get("1.16.1")
     check("每实例模式下 Java 存进实例覆盖",
-          override is not None and override.java_path == picked,
+          override is not None and override.java_path == str(java_high.path),
           f"override.java_path={getattr(override, 'java_path', None)}")
 
     window.close()
     window.deleteLater()
     app.processEvents()
 
-    # ------------------------------------------------ 配置本来就匹配时：绿字、没有替换按钮
+    # ------------------------------------------------ 声明相符时：绿字、没有替换按钮
     cfg2 = load_config()
     cfg2.launch.instance = "1.16.1"
+    # 注意：上面那个窗口 close() 时会把配置存盘（closeEvent 里 save_config），
+    # 所以这里必须把实例覆盖清掉，否则读到的还是上一个用例写进去的 Java 25
+    cfg2.launch.instances.pop("1.16.1", None)
     cfg2.launch.java_path = str(java8.path)
     window2 = MainWindow(cfg2)
     window2.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
     window2.show()
     app.processEvents()
-    check("配置匹配时提示是绿字 ✓",
-          "✓" in window2.java_hint.text() and "匹配" in window2.java_hint.text(),
+    check("配置与声明相符时提示是绿字 ✓",
+          "✓" in window2.java_hint.text() and "相符" in window2.java_hint.text(),
           window2.java_hint.text()[:90])
-    check("配置匹配时不出现一键替换按钮",
+    check("相符时不出现一键替换按钮",
           not window2.java_fix_button.isVisible(), window2.java_fix_button.text())
-    check("配置匹配时不会拦启动（_confirm_java_version 直接放行）",
-          window2._confirm_java_version() is True)
+    check("相符时不拦启动", window2._confirm_java_version() is True)
     window2.close()
     window2.deleteLater()
+    app.processEvents()
+
+    # ------------------------------------------------ 比声明【低】：这才是真的有问题
+    from mcsl.launch.java import read_install_cached, version_state
+    cfg3 = load_config()
+    cfg3.launch.instance = "26.3-Fabric"      # 版本 JSON 声明 Java 25
+    # 26.3-Fabric 在 defaults.json 里有自己的实例覆盖（java 指向 zulu-25），
+    # 先去掉，让它落到全局设置，才好构造"配了 Java 8"这种偏低的情况
+    cfg3.launch.instances.pop("26.3-Fabric", None)
+    cfg3.launch.java_path = str(java8.path)   # 配了 Java 8 → 偏低
+    window3 = MainWindow(cfg3)
+    window3.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window3.show()
+    app.processEvents()
+    hint3 = window3.java_hint.text()
+    check("比声明低时确实报红 ✗ 并说明可能失败",
+          "✗" in hint3 and "大概率失败" in hint3, hint3[:100])
+    check("比声明低时出现一键替换，且目标是更高的版本",
+          window3.java_fix_button.isVisible() and "Java 25" in window3.java_fix_button.text(),
+          window3.java_fix_button.text())
+    check("version_state 判定：8 < 25 → old",
+          version_state(read_install_cached(str(java8.path)), 25) == "old")
+    window3.close()
+    window3.deleteLater()
     app.processEvents()
 
     note(f"\n截图：{SHOTS}")

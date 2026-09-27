@@ -18,7 +18,8 @@ from ..auth.manager import AccountManager
 from ..auth.store import dpapi_available
 from ..config import CLOSE_ALWAYS, CLOSE_ASK, CLOSE_NEVER, AppConfig, load_config, save_config
 from ..launch.launcher import LaunchService
-from ..launch.java import find_java_installations, pick_best, read_install_cached
+from ..launch.java import (find_java_installations, pick_best, read_install_cached,
+                           version_state)
 from ..launch.version import list_instances, load_version
 from ..paths import data_root, logs_dir
 from ..tools import winproc
@@ -551,7 +552,15 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _refresh_java_hint(self) -> None:
-        """Java 那一行下面的状态提示：够不够、匹配不匹配、能否一键换掉。"""
+        """Java 那一行下面的状态提示。
+
+        规则（踩过坑所以写成这样）：
+          - 比声明版本**低** → 红字 + 一键替换（JVM 参数/加载器都可能要求更高的 Java）
+          - 比声明版本**高** → 只给一句灰色说明，不报警、不给替换按钮。
+            因为这里的"要求"只是游戏版本 JSON 的声明，装了模组、换了加载器或用了
+            新 JVM 参数之后，实际可用的版本和声明经常不一致（本机 1.16.1 就是用
+            Java 25 跑的，声明写的是 8）。
+        """
         required = self._required_java_major()
         current = self.picker_java.value()
         self._java_quickfix_target = None
@@ -563,31 +572,42 @@ class MainWindow(QMainWindow):
 
         if not current:
             if required:
-                paint(f"⚠ 还没指定 Java：本实例需要 Java {required}，点下面的按钮挑一个。", "#c62828")
+                paint(f"⚠ 还没指定 Java：实例 {self.cfg.launch.instance} 的版本 JSON 声明需要 "
+                      f"Java {required}，点下面的按钮挑一个。", "#c62828")
             else:
                 paint("还没有指定 Java。", "#8a8a8a")
             return
 
         install = read_install_cached(current)
-        if install is None:
+        state = version_state(install, required)
+
+        if state == "unknown":
             paint("✗ 这个路径读不出 Java 版本，可能不是 java.exe（或文件已不存在）。", "#c62828")
             return
-        if not required:
+        if state == "info":
             paint(f"✓ 当前 Java {install.major}（{install.version or '未知版本'}，"
-                  f"{install.vendor_label}）——本实例没有声明版本要求。", "#2e7d32")
+                  f"{install.vendor_label}）——本实例的版本 JSON 没有声明 Java 要求。", "#2e7d32")
             return
-        if install.matches(required):
+        if state == "match":
             paint(f"✓ 当前 Java {install.major}（{install.version or '未知版本'}，"
-                  f"{install.vendor_label}）与实例 {self.cfg.launch.instance} 匹配。", "#2e7d32")
+                  f"{install.vendor_label}）与实例 {self.cfg.launch.instance} 的声明相符。", "#2e7d32")
+            return
+        if state == "new":
+            # 偏高：不报警。这里多半是因为模组/JVM 参数把实际要求抬上去了。
+            paint(f"● 实例 {self.cfg.launch.instance} 的版本 JSON 声明需要 Java {required}，"
+                  f"当前是 Java {install.major}（{install.version or '未知版本'}）。"
+                  f"声明的只是游戏发布时的信息，装了模组/加载器或改了 JVM 参数后实际要求会变，"
+                  f"能正常启动就没问题。", "#8a8a8a")
             return
 
-        paint(f"✗ 实例 {self.cfg.launch.instance} 需要 Java {required}，"
-              f"当前是 Java {install.major}（{install.version or '未知版本'}）。", "#c62828")
-        # 只有"确实扫过一遍、并且扫到了匹配的"才给一键替换按钮，避免乱点
+        # state == "old"：真的偏低
+        paint(f"✗ 实例 {self.cfg.launch.instance} 声明需要 Java {required}，"
+              f"当前只有 Java {install.major}（{install.version or '未知版本'}），启动大概率失败。",
+              "#c62828")
         if not self._java_scanned:
             self._scan_java_quietly()
         best = pick_best(self._java_installs, required)
-        if best is not None and best.major != install.major:
+        if best is not None and best.major > install.major:
             self._java_quickfix_target = best
             self.java_fix_button.setText(f"换成 Java {best.major}（{best.vendor_label}）")
             self.java_fix_button.setVisible(True)
@@ -800,7 +820,10 @@ class MainWindow(QMainWindow):
             log.debug("MCSL_SKIP_JAVA_CHECK=1，跳过 Java 版本核对")
             return True
         install = read_install_cached(current)
-        if install is None or install.matches(required):
+        # 只在"确实偏低"时拦。比声明高不拦：声明只是游戏发布时的信息，
+        # 装了模组/换了加载器/改了 JVM 参数之后实际要求常常更高
+        # （本机 1.16.1 声明 Java 8，实际用 Java 25 跑）。
+        if version_state(install, required) != "old":
             return True
         instance = self.cfg.launch.instance
         if instance in self._java_mismatch_ok:
@@ -808,12 +831,12 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("Java 版本对不上")
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setText(f"实例 {instance} 声明需要 Java {required}，"
+        box.setText(f"实例 {instance} 的版本 JSON 声明需要 Java {required}，"
                     f"而当前配置的是 Java {install.major}"
-                    f"（{install.version or '版本未知'}）。")
+                    f"（{install.version or '版本未知'}），比声明版本低。")
         box.setInformativeText(
             f"路径：{install.path}\n\n继续启动很可能失败（报错信息通常也看不出是这个原因）。\n"
-            "建议点“取消”，再用“选择 Java…”换成匹配的版本。")
+            "建议点“取消”，再用“选择 Java…”换一个更新的版本。")
         go = box.addButton("仍然启动", QMessageBox.ButtonRole.DestructiveRole)
         fix = box.addButton("去换 Java…", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("取消", QMessageBox.ButtonRole.RejectRole)

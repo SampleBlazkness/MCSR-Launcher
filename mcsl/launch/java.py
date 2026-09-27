@@ -386,5 +386,21 @@ def find_broken_java_dirs() -> list[Path]:
     return broken
 
 
+def version_state(install: JavaInstall | None, required_major: int | None) -> str:
+    """当前 Java 与实例声明版本的关系。
+
+    "match" 相符 / "old" 偏低（真的会起不来）/ "new" 偏高（通常没问题，
+    但这个"声明"只是游戏发布时的信息，装过模组、换过加载器或改了 JVM 参数后
+    实际可用的版本可能不同）/ "unknown" 读不出来 / "info" 实例没声明要求。
+    """
+    if install is None:
+        return "unknown"
+    if not required_major:
+        return "info"
+    if install.major == required_major:
+        return "match"
+    return "old" if install.major < required_major else "new"
+
+
 def describe_requirement(required_major: int | None) -> str:
     return f"Java {required_major}" if required_major else "任意 Java 8+"

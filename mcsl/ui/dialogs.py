@@ -173,22 +173,31 @@ class JavaPickerDialog(QDialog):
         layout = QVBoxLayout(self)
 
         need = QLabel(
-            f"实例 <b>{instance}</b> 声明需要 <b>Java {required_major}</b>"
+            f"实例 <b>{instance}</b> 的版本 JSON 声明需要 <b>Java {required_major}</b>"
             if required_major else
-            f"实例 <b>{instance}</b> 没有声明 Java 版本要求（任意 Java 8+ 都可以）")
+            f"实例 <b>{instance}</b> 的版本 JSON 没有声明 Java 版本要求")
         need.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(need)
+
+        caveat = QLabel(
+            "这只是游戏发布时写下的声明。装了 Fabric、模组，或换了加载器 / JVM 参数之后，"
+            "实际能用的版本可能和它不同（例如 1.16.1 声明 Java 8，装速通模组后用 Java 25 跑；"
+            "新版 JVM 参数在 Java 8 上会直接拒绝启动）。所以“是否符合声明”只作参考，"
+            "能正常启动的版本就是对的。")
+        caveat.setWordWrap(True)
+        caveat.setStyleSheet("color:#8a8a8a;")
+        layout.addWidget(caveat)
 
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
 
-        self.only_match = QCheckBox("只显示与当前实例匹配的版本")
+        self.only_match = QCheckBox("只显示符合声明的版本")
         self.only_match.toggled.connect(self._refresh_table)
         layout.addWidget(self.only_match)
 
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["版本", "是否匹配", "厂商", "架构", "路径", "来源"])
+        self.table.setHorizontalHeaderLabels(["版本", "是否符合声明", "厂商", "架构", "路径", "来源"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -258,7 +267,7 @@ class JavaPickerDialog(QDialog):
             if current and str(inst.path).lower() == current:
                 label += "（当前使用）"
             if self.required_major:
-                match_text = "✓ 匹配" if matched else f"✗ 需要 Java {self.required_major}"
+                match_text = "✓ 符合" if matched else f"✗ 声明是 Java {self.required_major}"
             else:
                 match_text = "—"
             cells = [label, match_text, inst.vendor_label, inst.arch, str(inst.path), inst.source]
@@ -271,11 +280,17 @@ class JavaPickerDialog(QDialog):
 
         self._update_summary()
 
-        best = pick_best(installs, self.required_major)
-        if best is not None:
+        # 默认选中"当前配置的那个"，而不是"符合声明的最优解" —— 声明只是游戏发布时的
+        # 信息（1.16.1 声明 Java 8，但装速通模组后实际用 Java 25），不该自动推翻用户的既有选择。
+        target = None
+        if current:
+            target = next((i for i in installs if str(i.path).lower() == current), None)
+        if target is None:
+            target = pick_best(installs, self.required_major)
+        if target is not None:
             for row in range(self.table.rowCount()):
                 item = self.table.item(row, 0)
-                if item is not None and item.data(Qt.ItemDataRole.UserRole) == best:
+                if item is not None and item.data(Qt.ItemDataRole.UserRole) == target:
                     self.table.selectRow(row)
                     break
         self._on_selection_changed()
@@ -290,10 +305,12 @@ class JavaPickerDialog(QDialog):
             matched = sum(1 for i in self._installs if i.matches(self.required_major))
             text = f"共检测到 <b>{total}</b> 个 Java"
             if self.required_major:
-                text += f"，其中 <b>{matched}</b> 个匹配 Java {self.required_major}"
+                text += f"，其中 <b>{matched}</b> 个符合声明的 Java {self.required_major}"
                 if not matched:
-                    text += "。没有匹配的版本，直接启动很可能失败。"
-            self.summary.setText(text + "。列表按“匹配优先、版本从高到低”排序。")
+                    text += ("。没有符合声明的版本也没关系 —— 声明只是游戏发布时的信息，"
+                             "装过模组/加载器或改了 JVM 参数时这种情况很常见。")
+            self.summary.setText(text + "。列表按“符合声明优先、版本从高到低”排序，"
+                                        "默认选中的是你当前配置的那个。")
         if self._broken:
             names = "、".join(str(p) for p in self._broken[:4])
             self.note.setText(f"⚠ 这些目录看着像 Java 但里面没有 bin\\java.exe（可能装坏了）：{names}")
