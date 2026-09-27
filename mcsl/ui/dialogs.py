@@ -9,14 +9,19 @@ PySide6 会把它的执行线程判定为**发射信号的线程**，于是工�
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QMessageBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog,
+                               QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView,
+                               QLabel, QMessageBox, QPushButton, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..config import AppConfig
 from ..auth.manager import AccountManager
+from ..launch.java import (JavaInstall, find_broken_java_dirs, find_java_installations,
+                           pick_best, read_install)
 from .workers import LoginWorker, track_object, track_thread
 
 log = logging.getLogger(__name__)
@@ -143,3 +148,194 @@ class LoginDialog(QDialog):
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 接口
         self._cancel_and_wait()
         super().closeEvent(event)
+
+
+class JavaPickerDialog(QDialog):
+    """选择 Java 运行环境：列出本机所有 Java，标出与当前实例是否匹配。
+
+    为什么要有这个对话框：旧的"自动检测本机 Java"是把找到的候选项按**目录名字符串**
+    排序取最后一个（"zulu-8" 排在 "zulu-25" 之后），于是永远挑中 zulu-8；正确做法是
+    读出版本号，再按实例声明的 Java 大版本匹配，最后由人确认。
+    """
+
+    def __init__(self, *, instance: str, required_major: int | None, current_path: str = "",
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("选择 Java 运行环境")
+        self.resize(980, 520)
+        self.instance = instance
+        self.required_major = required_major
+        self.current_path = (current_path or "").strip()
+        self.selected: JavaInstall | None = None
+        self._installs: list[JavaInstall] = []
+        self._broken: list[Path] = []
+
+        layout = QVBoxLayout(self)
+
+        need = QLabel(
+            f"实例 <b>{instance}</b> 声明需要 <b>Java {required_major}</b>"
+            if required_major else
+            f"实例 <b>{instance}</b> 没有声明 Java 版本要求（任意 Java 8+ 都可以）")
+        need.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(need)
+
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
+
+        self.only_match = QCheckBox("只显示与当前实例匹配的版本")
+        self.only_match.toggled.connect(self._refresh_table)
+        layout.addWidget(self.only_match)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["版本", "是否匹配", "厂商", "架构", "路径", "来源"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        header = self.table.horizontalHeader()
+        for column in (0, 1, 2, 3, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.cellDoubleClicked.connect(self._on_row_activated)
+        layout.addWidget(self.table, 1)
+
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        self.note.setVisible(False)
+        layout.addWidget(self.note)
+
+        buttons = QHBoxLayout()
+        self.use_button = QPushButton("使用所选")
+        self.use_button.setDefault(True)
+        self.browse_button = QPushButton("手动选择 java.exe…")
+        self.rescan_button = QPushButton("重新检测")
+        cancel_button = QPushButton("取消")
+        self.use_button.clicked.connect(self._on_use)
+        self.browse_button.clicked.connect(self._on_browse)
+        self.rescan_button.clicked.connect(self._on_rescan)
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.use_button)
+        buttons.addWidget(self.browse_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self.rescan_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+
+        self._rescan()
+
+    # ------------------------------------------------------------------ 扫描
+    @Slot()
+    def _on_rescan(self) -> None:
+        """按钮槽：重新扫一遍（与 _rescan 分开，避免信号名不一致的坑）。"""
+        self._rescan()
+
+    @Slot()
+    def _rescan(self) -> None:
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self._installs = find_java_installations([self.current_path])
+            self._broken = find_broken_java_dirs()
+        finally:
+            QApplication.restoreOverrideCursor()
+        log.info("Java 检测：%d 个可用，%d 个可疑目录", len(self._installs), len(self._broken))
+        self._refresh_table()
+
+    @Slot()
+    def _refresh_table(self) -> None:
+        installs = self._installs
+        if self.only_match.isChecked() and self.required_major:
+            installs = [i for i in installs if i.matches(self.required_major)]
+        installs = sorted(installs, key=lambda i: i.sort_key(self.required_major))
+
+        current = str(Path(self.current_path)).lower() if self.current_path else ""
+        self.table.setRowCount(len(installs))
+        for row, inst in enumerate(installs):
+            matched = inst.matches(self.required_major)
+            label = inst.version_label
+            if current and str(inst.path).lower() == current:
+                label += "（当前使用）"
+            if self.required_major:
+                match_text = "✓ 匹配" if matched else f"✗ 需要 Java {self.required_major}"
+            else:
+                match_text = "—"
+            cells = [label, match_text, inst.vendor_label, inst.arch, str(inst.path), inst.source]
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.ItemDataRole.UserRole, inst)
+                if not matched:
+                    item.setForeground(QBrush(QColor("#8a8a8a")))
+                self.table.setItem(row, col, item)
+
+        self._update_summary()
+
+        best = pick_best(installs, self.required_major)
+        if best is not None:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item is not None and item.data(Qt.ItemDataRole.UserRole) == best:
+                    self.table.selectRow(row)
+                    break
+        self._on_selection_changed()
+
+    def _update_summary(self) -> None:
+        total = len(self._installs)
+        if not total:
+            self.summary.setText(
+                "没有在本机找到可用的 Java。请点“手动选择 java.exe…”指定，或先装一个"
+                "（1.16.1 需要 Java 8，26.x 需要 Java 21/25）。")
+        else:
+            matched = sum(1 for i in self._installs if i.matches(self.required_major))
+            text = f"共检测到 <b>{total}</b> 个 Java"
+            if self.required_major:
+                text += f"，其中 <b>{matched}</b> 个匹配 Java {self.required_major}"
+                if not matched:
+                    text += "。没有匹配的版本，直接启动很可能失败。"
+            self.summary.setText(text + "。列表按“匹配优先、版本从高到低”排序。")
+        if self._broken:
+            names = "、".join(str(p) for p in self._broken[:4])
+            self.note.setText(f"⚠ 这些目录看着像 Java 但里面没有 bin\\java.exe（可能装坏了）：{names}")
+            self.note.setVisible(True)
+        else:
+            self.note.setVisible(False)
+
+    # ------------------------------------------------------------------ 交互
+    @Slot()
+    def _on_selection_changed(self) -> None:
+        self.use_button.setEnabled(self.table.currentRow() >= 0)
+
+    @Slot(int, int)
+    def _on_row_activated(self, row: int, _column: int) -> None:
+        self.table.selectRow(row)
+        self._on_use()
+
+    @Slot()
+    def _on_use(self) -> None:
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        install = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if install is None:
+            return
+        self.selected = install
+        log.info("用户选择 Java %s（%s）", install.version_label, install.path)
+        self.accept()
+
+    @Slot()
+    def _on_browse(self) -> None:
+        start = str(Path(self.current_path).parent) if self.current_path else "C:/Program Files"
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "选择 java.exe", start, "Java 可执行文件 (java.exe);;所有文件 (*)")
+        if not chosen:
+            return
+        install = read_install(Path(chosen), "手动选择")
+        if install is None:
+            QMessageBox.warning(self, "不是可用的 Java",
+                                f"读不出这个文件的版本信息，它可能不是 java.exe：\n{chosen}")
+            return
+        if all(str(i.path).lower() != str(install.path).lower() for i in self._installs):
+            self._installs.insert(0, install)
+        self._refresh_table()
+        self.selected = install
+        self.accept()

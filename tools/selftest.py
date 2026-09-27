@@ -174,6 +174,59 @@ def test_secret_scan() -> None:
         check("扫描器不误报正常文件", not module.scan(good))
 
 
+def test_java() -> None:
+    """Java 检测：版本号解析、release 文件读取、排序/挑选规则。
+
+    这里用合成数据，不依赖本机装了什么 —— 旧的"按目录名排序取最后一个"逻辑
+    在这组用例下会直接失败（"zulu-8" > "zulu-25"）。
+    """
+    from mcsl.launch.java import JavaInstall, parse_major, pick_best, read_install
+
+    for text, expected in (("1.8.0_432", 8), ("25.0.2", 25), ("17", 17),
+                           ("21.0.1+12-LTS", 21), ("", 0), ("junk", 0)):
+        check(f"parse_major({text!r}) == {expected}", parse_major(text) == expected,
+              f"得到 {parse_major(text)}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / "zulu-8"
+        (home / "bin").mkdir(parents=True)
+        fake = home / "bin" / "java.exe"
+        fake.write_bytes(b"\x00\x00")            # 不是真的可执行文件，只测解析
+        (home / "release").write_text(
+            'IMPLEMENTOR="Azul Systems, Inc."\nJAVA_VERSION="1.8.0_432"\nOS_ARCH="amd64"\n',
+            encoding="utf-8")
+        install = read_install(fake, "测试")
+        check("read_install 读 release 文件得到大版本 8",
+              install is not None and install.major == 8,
+              f"得到 {install.major if install else None}")
+        check("厂商/架构解析正确",
+              install is not None and "Azul" in install.vendor_label and install.arch == "x64",
+              f"{install.vendor_label if install else '-'}/{install.arch if install else '-'}")
+
+        # 没有 release 且不是可执行文件 → 应当被判为不可用，而不是猜一个版本
+        broken = Path(tmp) / "jdk-21" / "bin" / "java.exe"
+        broken.parent.mkdir(parents=True)
+        broken.write_bytes(b"\x00\x00")
+        check("读不出版本的文件被判为不可用",
+              read_install(broken, "测试") is None)
+
+    def make(major: int, path: str) -> JavaInstall:
+        return JavaInstall(path=Path(path), home=Path(path).parent.parent, major=major,
+                           version=str(major), vendor="Test", arch="x64", source="测试")
+
+    installs = [make(8, r"C:\zulu-8\bin\java.exe"), make(21, r"C:\zulu-21\bin\java.exe"),
+                make(25, r"C:\zulu-25\bin\java.exe")]
+    check("需要 Java 8 时挑 Java 8",
+          pick_best(installs, 8).major == 8, f"得到 {pick_best(installs, 8).major}")
+    check("需要 Java 25 时挑 Java 25",
+          pick_best(installs, 25).major == 25, f"得到 {pick_best(installs, 25).major}")
+    check("实例没声明要求时挑版本最高的",
+          pick_best(installs, None).major == 25, f"得到 {pick_best(installs, None).major}")
+    check("没有匹配版本时挑一个最接近的（供提示，不等于匹配）",
+          pick_best([make(8, r"C:\a\bin\java.exe")], 21).major == 8)
+    check("空列表返回 None", pick_best([], 8) is None)
+
+
 def main() -> int:
     print("=" * 60)
     test_rules()
@@ -183,6 +236,8 @@ def main() -> int:
     test_config()
     print("-" * 60)
     test_instances()
+    print("-" * 60)
+    test_java()
     print("-" * 60)
     test_startup_path()
     print("-" * 60)

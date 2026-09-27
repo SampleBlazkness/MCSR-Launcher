@@ -72,8 +72,36 @@ python -m venv .venv
 4. 「启动设置」页调内存 / JVM 参数（默认已经是你原来那套调参）。
 5. 点「启动游戏」。
 
-默认会**询问是否以管理员身份重新启动自己**——必须提权才能正常关闭 Jingle
-这类以管理员身份启动的工具。UAC 设为「始终允许」时不会弹窗。
+默认会**以管理员身份重新启动自己**（不再询问）——必须提权才能正常关闭 Jingle
+这类以管理员身份启动的工具。提权被拒时会弹出警告，可选择重试或仍以普通权限启动。
+
+---
+
+## Java：为什么不再"自动挑一个"
+
+旧版本点「自动检测本机 Java」是把找到的候选按**目录名**排序取最后一个 —— 字符串比较下
+`zulu-8` 排在 `zulu-25` 之后，所以永远挑中 Java 8。1.16.1 用 Java 8 恰好是对的，
+可一旦切到需要 Java 25 的 26.3 实例就必错，而且错得没有提示。
+
+现在：
+
+- `mcsl/launch/java.py` 从注册表、`PATH`、`JAVA_HOME`、常见安装目录（Zulu / Adoptium /
+  Microsoft / Corretto / Liberica，以及官方启动器自带的 `runtime`）找出**所有** `java.exe`，
+  然后**读 JDK 自带的 `release` 文件**拿到真实版本号（读不到才回退到起一个 `java -version`，
+  并按路径+mtime 缓存，不会每次输入都去起进程）；读不出版本的文件直接判为不可用。
+- Java 输入框下面有一行状态提示：匹配是绿字，不匹配是红字，**并给出「换成 Java 8（Azul）」
+  这样的一键替换按钮**。
+- 「选择 Java…（列出本机全部）」打开列表：每行显示 版本 / 是否匹配 / 厂商 / 架构 / 路径 / 来源，
+  按「匹配优先、版本从高到低」排序，默认预选最合适的那个；还有「只显示与当前实例匹配的版本」
+  筛选、「手动选择 java.exe…」和「重新检测」。列表下方会提示
+  「看着像 Java 但里面没有 `bin\java.exe`」的坏目录（实测遇到过一个装到一半的 `zulu-21`）。
+- 点「启动游戏」时会核对版本：不匹配弹一次确认（可以「仍然启动」，也可以直接「去换 Java…」），
+  同一次运行里同一个实例只问一次。
+
+实例需要哪个版本，直接读版本 JSON 的 `javaVersion.majorVersion`（本机：1.16.1 → 8，
+26.3-Fabric → 25）。**Java 是按实例记住的**：勾上「上面的内存/JVM 参数只对当前实例生效」时，
+选中的 Java 写进该实例的覆盖项（`launch.instances["<实例>"].java_path`），没勾就写全局 ——
+所以两个实例可以各自记住自己的 Java，切实例时提示行会立刻告诉你对不对。
 
 ---
 
@@ -83,6 +111,7 @@ python -m venv .venv
 mcsl/
   auth/        微软 OAuth（设备码 + 浏览器授权码 PKCE）/ XBL / XSTS / Minecraft Services / DPAPI 凭据存储
   launch/      版本 JSON 解析（含 inheritsFrom 合并）、rules 求值、natives、命令行组装、进程管理
+               java.py：扫描本机所有 Java 并识别版本（注册表 / PATH / JAVA_HOME / 常见安装目录）
   tools/       Jingle / NinjabrainBot / OBS 的启动与关闭（纯 ctypes 的 Windows 进程/窗口操作）
   ui/          PySide6 界面（core 层不依赖它）
   cli.py       无界面入口，便于调试和自动化
@@ -91,6 +120,7 @@ config/
 tools/
   check_secrets.py       提交前密钥扫描（pre-commit 钩子调用）
   compare_with_ps1.py    开发期校验：把生成的命令行与 HMCL 导出脚本逐项对比
+  ui_java_picker_probe.py Java 选择对话框 / 提示行的交互探针
 ```
 
 运行期数据**全部在仓库之外**：

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -17,7 +18,8 @@ from ..auth.manager import AccountManager
 from ..auth.store import dpapi_available
 from ..config import CLOSE_ALWAYS, CLOSE_ASK, CLOSE_NEVER, AppConfig, load_config, save_config
 from ..launch.launcher import LaunchService
-from ..launch.version import list_instances
+from ..launch.java import find_java_installations, pick_best, read_install_cached
+from ..launch.version import list_instances, load_version
 from ..paths import data_root, logs_dir
 from ..tools import winproc
 from ..tools.manager import TOOL_LABELS
@@ -43,6 +45,13 @@ class MainWindow(QMainWindow):
         self._login_dialog: QDialog | None = None
         self._busy = False
         self._saved_snapshot: dict = {}
+        # Java 相关缓存：实例声明的 Java 版本、本机扫到的 Java 清单
+        self._required_java_cache: dict[tuple[str, str], int | None] = {}
+        self._java_installs: list = []
+        self._java_scanned = False
+        self._java_quickfix_target = None
+        # 同一次运行里，用户对某个实例的"版本不匹配也继续"只问一次
+        self._java_mismatch_ok: set[str] = set()
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.resize(980, 720)
@@ -58,6 +67,7 @@ class MainWindow(QMainWindow):
         self._load_into_ui()
         self._refresh_instances(reload_only=True)
         self._loading = False
+        self._refresh_java_hint()
         # 保存按钮只在配置真的变了才可点；改回原样也要重新变灰。
         # 用轮询而不是逐个信号连接：控件太多，漏一个就会出现"改了不变灰"。
         self._mark_saved()
@@ -168,8 +178,18 @@ class MainWindow(QMainWindow):
             form.addWidget(widget)
             widget.changed.connect(self._on_path_changed)
 
+        java_hint_row = QHBoxLayout()
+        self.java_hint = QLabel()
+        self.java_hint.setWordWrap(True)
+        self.java_fix_button = QPushButton("")
+        self.java_fix_button.setVisible(False)
+        self.java_fix_button.clicked.connect(self._on_java_quickfix)
+        java_hint_row.addWidget(self.java_hint, 1)
+        java_hint_row.addWidget(self.java_fix_button)
+        form.addLayout(java_hint_row)
+
         pickers = QHBoxLayout()
-        self.detect_java_button = QPushButton("自动检测本机 Java")
+        self.detect_java_button = QPushButton("选择 Java…（列出本机全部）")
         self.detect_java_button.clicked.connect(self._on_detect_java)
         pickers.addStretch(1)
         pickers.addWidget(self.detect_java_button)
@@ -373,8 +393,6 @@ class MainWindow(QMainWindow):
     def _collect_from_ui(self) -> AppConfig:
         cfg = self.cfg
         cfg.launch.minecraft_dir = self.picker_mc.value()
-        cfg.launch.java_path = self.picker_java.value() if not self.per_instance_check.isChecked() \
-            else cfg.launch.java_path
         for name, picker in (("ninjabrainbot", self.picker_njb), ("jingle", self.picker_jingle),
                              ("obs", self.picker_obs)):
             tool = cfg.tools.get(name)
@@ -388,6 +406,10 @@ class MainWindow(QMainWindow):
             "jvm_args_extra": self.extra_args_edit.text(),
             "width": self.width_spin.value(),
             "height": self.height_spin.value(),
+            # Java 也走这套：勾了"只对当前实例生效"就存进实例覆盖，否则存全局。
+            # 这台机器上两个实例需要不同 Java（1.16.1 要 8、26.3 要 25），
+            # 以前这里把界面上的 Java 直接忽略掉，等于改了不生效。
+            "java_path": self.picker_java.value(),
         }
         if self.per_instance_check.isChecked():
             from ..config import InstanceOverride
@@ -456,6 +478,7 @@ class MainWindow(QMainWindow):
         cfg = self._collect_from_ui()
         if Path(cfg.launch.minecraft_dir).is_dir():
             self._refresh_instances(reload_only=True)
+        self._refresh_java_hint()
 
     def _select_combo(self, combo: QComboBox, value: str) -> None:
         index = combo.findData(value)
@@ -469,25 +492,114 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"已切换到实例 {name}", 3000)
 
     def _on_detect_java(self) -> None:
-        candidates: list[Path] = []
-        for root in (Path("C:/Program Files/Zulu"), Path("C:/Program Files/Java"),
-                     Path("C:/Program Files/Eclipse Adoptium"),
-                     Path("C:/Program Files/Microsoft")):
-            if root.is_dir():
-                for child in root.iterdir():
-                    exe = child / "bin" / "java.exe"
-                    if exe.is_file():
-                        candidates.append(exe)
-        for extra in (Path(self.picker_java.value()), Path(sys.executable).parent / "java.exe"):
-            if extra.is_file() and extra not in candidates:
-                candidates.append(extra)
-        if not candidates:
-            QMessageBox.information(self, "没找到 Java", "没有在常见安装目录里找到 java.exe，请手动选择。")
+        """打开 Java 选择对话框（不再"自动挑第一个"）。"""
+        from .dialogs import JavaPickerDialog
+
+        required = self._required_java_major()
+        dialog = JavaPickerDialog(instance=self.cfg.launch.instance, required_major=required,
+                                  current_path=self.picker_java.value(), parent=self)
+        track_object(dialog)
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected is not None
+        finally:
+            dialog.deleteLater()
+        # 对话框重新扫过一遍，把结果留给提示行复用
+        self._java_installs = list(getattr(dialog, "_installs", []) or [])
+        self._java_scanned = True
+        if not accepted:
+            self._refresh_java_hint()
             return
-        # 选版本号最大的（目录名大致按版本排序）
-        best = sorted(candidates, key=lambda p: p.parent.parent.name)[-1]
-        self.picker_java.set_value(str(best))
-        self._append_log(f"已检测到 Java：{best}")
+        install = dialog.selected
+        self._apply_java_choice(install)
+        self._append_log(f"已选择 Java {install.major}（{install.version or '版本未知'}）"
+                         f"：{install.path}")
+        self.status.showMessage(f"Java 已设为 {install.version_label}", 4000)
+        self._refresh_java_hint()
+
+    def _apply_java_choice(self, install) -> None:
+        """把选中的 Java 写进界面，并按"每实例"开关决定存到哪儿。
+
+        存法要和 _collect_from_ui 一致：勾了"只对当前实例生效"就写进实例覆盖，
+        否则写全局 —— 两个实例需要不同 Java（1.16.1 要 8、26.3 要 25）时靠这个区分。
+        """
+        self.picker_java.set_value(str(install.path))
+
+    def _on_java_quickfix(self) -> None:
+        """提示行里的"换成匹配版本"按钮。"""
+        target = getattr(self, "_java_quickfix_target", None)
+        if target is None:
+            return
+        self._apply_java_choice(target)
+        self._append_log(f"已改用 Java {target.major}（{target.version or '版本未知'}）"
+                         f"：{target.path}")
+        self.status.showMessage(f"已换成 {target.version_label}", 4000)
+        self._refresh_java_hint()
+
+    def _required_java_major(self) -> int | None:
+        """当前实例声明的 Java 大版本；读不到（缺文件/JSON 坏了）返回 None。"""
+        cfg = self.cfg
+        key = (cfg.launch.minecraft_dir, cfg.launch.instance)
+        if key in self._required_java_cache:
+            return self._required_java_cache[key]
+        major: int | None = None
+        try:
+            major = load_version(Path(cfg.launch.minecraft_dir), cfg.launch.instance).java_major or None
+        except Exception as exc:  # noqa: BLE001 - 版本 JSON 缺失/损坏都不该拦住界面
+            log.debug("读实例 %s 的 Java 要求失败：%s", cfg.launch.instance, exc)
+        self._required_java_cache[key] = major
+        return major
+
+    @Slot()
+    def _refresh_java_hint(self) -> None:
+        """Java 那一行下面的状态提示：够不够、匹配不匹配、能否一键换掉。"""
+        required = self._required_java_major()
+        current = self.picker_java.value()
+        self._java_quickfix_target = None
+        self.java_fix_button.setVisible(False)
+
+        def paint(text: str, color: str) -> None:
+            self.java_hint.setText(text)
+            self.java_hint.setStyleSheet(f"color:{color};")
+
+        if not current:
+            if required:
+                paint(f"⚠ 还没指定 Java：本实例需要 Java {required}，点下面的按钮挑一个。", "#c62828")
+            else:
+                paint("还没有指定 Java。", "#8a8a8a")
+            return
+
+        install = read_install_cached(current)
+        if install is None:
+            paint("✗ 这个路径读不出 Java 版本，可能不是 java.exe（或文件已不存在）。", "#c62828")
+            return
+        if not required:
+            paint(f"✓ 当前 Java {install.major}（{install.version or '未知版本'}，"
+                  f"{install.vendor_label}）——本实例没有声明版本要求。", "#2e7d32")
+            return
+        if install.matches(required):
+            paint(f"✓ 当前 Java {install.major}（{install.version or '未知版本'}，"
+                  f"{install.vendor_label}）与实例 {self.cfg.launch.instance} 匹配。", "#2e7d32")
+            return
+
+        paint(f"✗ 实例 {self.cfg.launch.instance} 需要 Java {required}，"
+              f"当前是 Java {install.major}（{install.version or '未知版本'}）。", "#c62828")
+        # 只有"确实扫过一遍、并且扫到了匹配的"才给一键替换按钮，避免乱点
+        if not self._java_scanned:
+            self._scan_java_quietly()
+        best = pick_best(self._java_installs, required)
+        if best is not None and best.major != install.major:
+            self._java_quickfix_target = best
+            self.java_fix_button.setText(f"换成 Java {best.major}（{best.vendor_label}）")
+            self.java_fix_button.setVisible(True)
+
+    def _scan_java_quietly(self) -> None:
+        """静默扫一遍本机 Java（0.2 秒量级），结果缓存给提示行和快速修复用。"""
+        try:
+            self._java_installs = find_java_installations([self.picker_java.value()])
+        except Exception as exc:  # noqa: BLE001
+            log.debug("扫描 Java 失败：%s", exc)
+            self._java_installs = []
+        self._java_scanned = True
 
     def _on_jvm_edited(self, *_args) -> None:
         if self._loading:
@@ -659,6 +771,9 @@ class MainWindow(QMainWindow):
                 self._on_login_clicked()
             return
 
+        if not self._confirm_java_version():
+            return
+
         self.accounts.cfg = self.cfg.auth
         self._set_busy(True, "正在准备启动…")
         worker = LaunchWorker(self.cfg, self.accounts,
@@ -669,6 +784,49 @@ class MainWindow(QMainWindow):
         worker.game_exited.connect(self._on_game_exited)
         worker.finished.connect(self._on_launch_finished)
         self._start_worker(worker)
+
+    def _confirm_java_version(self) -> bool:
+        """启动前核对 Java 版本：不匹配就问一次（同一次运行里每个实例只问一次）。
+
+        为什么要拦一下：Java 版本不对时游戏挂得很惨（1.16.1 用 Java 25 会在很早就崩，
+        报错信息还看不懂），而这里我们已经知道实例声明需要哪个版本了。
+        """
+        required = self._required_java_major()
+        current = self.picker_java.value()
+        if not required or not current:
+            return True
+        if os.environ.get("MCSL_SKIP_JAVA_CHECK") == "1":
+            # 测试/无人值守用逃生口：否则探针会被这个模态框挂住
+            log.debug("MCSL_SKIP_JAVA_CHECK=1，跳过 Java 版本核对")
+            return True
+        install = read_install_cached(current)
+        if install is None or install.matches(required):
+            return True
+        instance = self.cfg.launch.instance
+        if instance in self._java_mismatch_ok:
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle("Java 版本对不上")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"实例 {instance} 声明需要 Java {required}，"
+                    f"而当前配置的是 Java {install.major}"
+                    f"（{install.version or '版本未知'}）。")
+        box.setInformativeText(
+            f"路径：{install.path}\n\n继续启动很可能失败（报错信息通常也看不出是这个原因）。\n"
+            "建议点“取消”，再用“选择 Java…”换成匹配的版本。")
+        go = box.addButton("仍然启动", QMessageBox.ButtonRole.DestructiveRole)
+        fix = box.addButton("去换 Java…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(fix)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is go:
+            self._java_mismatch_ok.add(instance)
+            self._append_log(f"⚠ 已按用户选择用 Java {install.major} 启动需要 Java {required} 的实例")
+            return True
+        if clicked is fix:
+            self._on_detect_java()
+        return False
 
     @Slot(str)
     def _on_launch_status(self, message: str) -> None:
