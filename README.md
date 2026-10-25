@@ -22,7 +22,7 @@
 ## 快速开始
 
 ```bash
-# 1. 依赖（仓库里已经建好 .venv）
+# 1. 依赖（.venv 不在仓库里，按需创建一次）
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 
@@ -171,7 +171,8 @@ tools/
 - **工具退出策略**：每个工具可选「自动关闭 / 退出时询问 / 保持运行」。
   默认 NinjabrainBot 和 Jingle 自动关，OBS 询问。
 - **提权与游戏捕获**：MC 由提权进程启动时自身也是提权的，OBS 必须同样提权才能
-  对它做游戏捕获，所以默认三个工具都按「管理员」启动（和你的旧脚本行为一致）。
+  对它做游戏捕获。默认 OBS 和 Jingle 以管理员身份启动，NinjabrainBot 不提权；
+  三项都可以在配置里单独改。
   如果你关掉了启动器提权，Jingle / OBS 会改用提权 taskkill 收尾，可能弹一次 UAC。
 - **命令行生成**：完全由版本 JSON 驱动（`arguments.jvm` / `arguments.game` + 占位符 +
   rules 求值），和 HMCL / 官方启动器同一套逻辑，装新实例不用改代码。
